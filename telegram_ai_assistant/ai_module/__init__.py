@@ -1,1 +1,1 @@
-"""AI analysis module using OpenAI GPT-4o""" 
+"""AI analysis module using OpenAI o3-mini""" 

@@ -16,7 +16,7 @@ Telegram AI Assistant is a powerful tool for productive work with Telegram chats
 ## ✨ Key Features
 
 - **Passive chat monitoring** - reads messages in all or selected chats without sending messages on your behalf
-- **AI content analysis** - uses OpenAI GPT-4o to understand the context of messages, images, and links
+- **AI content analysis** - uses OpenAI o3-mini to understand the context of messages, images, and links
 - **Task management** - automatically detects tasks in messages and creates them in Linear
 - **Question tracking** - identifies questions directed at you and reminds you of unanswered ones
 - **Automatic summaries** - generates brief reports on discussions in chats
@@ -32,7 +32,7 @@ Telegram AI Assistant is a powerful tool for productive work with Telegram chats
 The system consists of several components:
 
 1. **Telegram Userbot** - uses Telethon to read messages from your account
-2. **AI module** - analyzes message content using OpenAI GPT-4o
+2. **AI module** - analyzes message content using OpenAI o3-mini
 3. **Linear integration** - manages tasks in the Linear tracker
 4. **Telegram Bot** - provides an interface for interacting with the system
 5. **Database** - stores messages, tasks, and other data
@@ -229,7 +229,7 @@ From chat: Dev Team
 - Python 3.8+
 - Telegram API keys (from [my.telegram.org/apps](https://my.telegram.org/apps))
 - Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- OpenAI API key with access to GPT-4o
+- OpenAI API key with access to o3-mini
 - Linear API key (optional, for task integration)
 
 ## 📦 Installation
@@ -308,7 +308,7 @@ MONITORED_CHATS=[]
 OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz1234567890
 
 # OpenAI model
-OPENAI_MODEL=gpt-4o
+OPENAI_MODEL=o3-mini
 
 # Linear API key
 LINEAR_API_KEY=lin_abcdefghijklmnopqrstuvwxyz

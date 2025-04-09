@@ -29,13 +29,17 @@ from telegram_ai_assistant.ai_module.ai_analyzer import (
     analyze_productivity,
     suggest_response,
     client,
-    generate_sql_from_question
+    generate_sql_from_question,
+    iterative_reasoning,
+    iterative_discussion_summary,
+    ai_agent_query
 )
 from telegram_ai_assistant.ai_module.context_processor import process_question_with_context, analyze_message_intent
 from telegram_ai_assistant.linear_integration.linear_client import LinearClient
 from telegram_ai_assistant.userbot.telegram_client import send_message_as_user
 from telegram_ai_assistant.utils.task_utils import pending_tasks
 from telegram_ai_assistant.utils.logging_utils import setup_bot_logger, log_startup
+from aiogram.fsm.context import FSMContext
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 linear_client = LinearClient()
@@ -69,29 +73,48 @@ async def cmd_start(message: types.Message):
     )
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    """Handle /help command"""
+    """Show available commands"""
     if message.from_user.id != ADMIN_USER_ID:
+        await message.reply("I'm a personal assistant bot.")
         return
     
-    help_text = (
-        "📋 <b>Available Commands</b>\n\n"
-        "/summary [chat_name] - Generate summary of recent conversations\n"
-        "/tasks - Show pending tasks in Linear\n"
-        "/reminders - Check for unanswered questions\n"
-        "/teamreport - View team productivity report\n"
-        "/chats - List your available chats\n"
-        "/createtask - Create a new task in Linear\n"
-        "/respond [chat_id] [message_id] - Respond to a message\n"
-        "/ask [question] - Query the database using natural language\n"
-        "  • Добавьте флаг --details или -d для просмотра деталей контекста\n\n"
-        
-        "🧠 <b>Улучшенные возможности:</b>\n"
-        "• Бот теперь анализирует 40 сообщений из текущего чата для контекста\n"
-        "• При необходимости запрашивает историю других чатов или данные из БД\n"
-        "• Автоматически определяет, какая информация нужна для ответа\n"
-    )
-    
-    await message.reply(help_text, parse_mode="HTML")
+    help_text = """
+🤖 *Telegram AI Assistant*
+
+*Available Commands:*
+
+📋 *Tasks & Work*
+/tasks - View pending tasks from Linear
+/createtask - Create a new task in Linear
+/dailytasks - View tasks for today
+/assigntask - Assign a task to a team member
+
+❓ *Questions & Reminders*
+/reminders - Check unanswered questions
+/respond - Respond to a pending question
+
+📊 *Insights & Summaries*
+/summary [chat_name] - Get a chat summary (all chats or specific)
+/teamreport - View team productivity report
+/chatactivity - See chat activity statistics
+/discussionsummary - Generate step-by-step discussion analysis with corrections
+
+🧠 *AI Functions*
+/agent [question] - AI agent that plans & executes DB queries to answer questions
+/reason - Solve problems with step-by-step reasoning
+/ask - Ask a question using database information
+/sqlquery - Run a specific SQL query
+/classify - Classify a message by type/intent
+
+🔄 *System & Utilities*
+/start - Initialize the bot
+/help - Show this help message
+/status - Check system status
+/settings - Configure bot settings
+
+For any issues or questions about the bot itself, contact the developer.
+"""
+    await message.reply(help_text, parse_mode="Markdown")
 @dp.message(Command("summary"))
 async def cmd_summary(message: types.Message):
     """Generate and send summary of recent conversations"""
@@ -412,86 +435,428 @@ async def cmd_chats(message: types.Message):
         await processing_msg.edit_text(f"Error retrieving chats: {str(e)}")
 @dp.message(Command("ask"))
 async def cmd_ask(message: types.Message):
-    """Handle /ask command to query the database with natural language"""
-    command_parts = message.text.split(maxsplit=1)
-    
-    # Проверка наличия флага технических деталей
-    show_details = False
-    question = ""
-    
-    if len(command_parts) < 2:
-        await message.reply("Пожалуйста, укажите вопрос после команды /ask.")
+    """Ask a question using natural language"""
+    if message.from_user.id != ADMIN_USER_ID:
         return
     
-    # Проверяем наличие флага --details или -d
-    if "--details" in command_parts[1] or "-d" in command_parts[1]:
-        show_details = True
-        # Удаляем флаг из вопроса
-        question = command_parts[1].replace("--details", "").replace("-d", "").strip()
-        if not question:
-            await message.reply("Пожалуйста, укажите вопрос после команды и флага.")
+    try:
+        # Get the question from the message text (remove the /ask command)
+        text = message.text
+        parts = text.split(maxsplit=1)
+        
+        if len(parts) < 2:
+            await message.reply(
+                "Please provide a question. Usage:\n"
+                "/ask [your question]\n\n"
+                "To use the old context-based approach, add the --old flag:\n"
+                "/ask --old [your question]"
+            )
             return
-    else:
-        question = command_parts[1]
+        
+        # Check for flags
+        query_text = parts[1]
+        use_legacy_mode = False
+        show_details = False
+        
+        if "--old" in query_text:
+            use_legacy_mode = True
+            query_text = query_text.replace("--old", "").strip()
+        
+        if "--details" in query_text or "-d" in query_text:
+            show_details = True
+            query_text = query_text.replace("--details", "").replace("-d", "").strip()
+        
+        if use_legacy_mode:
+            # Use the old context-based approach
+            processing_msg = await message.reply("Обрабатываю ваш вопрос...")
+            
+            try:
+                chat_id = message.chat.id
+                result = await process_question_with_context(query_text, chat_id)
+                
+                answer = result.get("answer", "Не удалось сформировать ответ")
+                
+                if show_details:
+                    context_used = result.get("context_used", "unknown")
+                    details = result.get("details", {})
+                    
+                    details_text = f"\n\n<b>📊 Контекст:</b> {context_used}"
+                    
+                    if context_used == "database_query" and "sql_query" in details:
+                        details_text += f"\n<b>SQL:</b>\n<pre>{details['sql_query']}</pre>"
+                    
+                    answer += details_text
+                
+                await processing_msg.edit_text(answer, parse_mode="HTML")
+                logger.info(f"Processed contextual question: {query_text[:50]}...")
+            except Exception as e:
+                logger.error(f"Error processing contextual question: {str(e)}")
+                await processing_msg.edit_text(f"Произошла ошибка: {str(e)}")
+        else:
+            # Use the new autonomous AI agent approach
+            await message.reply(
+                "🤖 Starting AI analysis of your question...\n"
+                "I'll plan and execute the necessary database queries to find your answer."
+            )
+            
+            # Start the autonomous agent
+            from telegram_ai_assistant.ai_module.ai_analyzer import ai_agent_query
+            asyncio.create_task(ai_agent_query(query_text))
+            
+            logger.info(f"Started autonomous AI agent for question: {query_text[:50]}...")
     
-    processing_msg = await message.reply("Анализирую ваш вопрос...")
+    except Exception as e:
+        logger.error(f"Error in ask command: {str(e)}")
+        await message.reply(f"Error processing your question: {str(e)}")
+@dp.message(Command("reason"))
+async def cmd_reason(message: types.Message):
+    """Solve a problem using iterative reasoning with visible thought process"""
+    if message.from_user.id != ADMIN_USER_ID:
+        return
     
     try:
-        # Получаем список доступных чатов
-        available_chats = await get_user_chats()
+        # Get the question from the message text (remove the /reason command)
+        command_parts = message.text.split(maxsplit=1)
+        if len(command_parts) < 2:
+            await message.reply(
+                "Please provide a question or problem to reason about.\n"
+                "Example: /reason Calculate the compound interest on $1000 invested for 5 years at 8% annual interest rate with quarterly compounding."
+            )
+            return
         
-        # Обрабатываем вопрос с учетом контекста
-        result = await process_question_with_context(
-            question=question, 
-            chat_id=message.chat.id, 
-            available_chats=available_chats
+        question = command_parts[1].strip()
+        
+        # Let the user know we're starting the reasoning process
+        intro_message = await message.reply(
+            "🧠 Starting iterative reasoning process...\n"
+            "I'll think step-by-step and show my work in a continuously updated message."
         )
         
-        # Если нужно показать детали и контекста
-        if show_details:
-            detailed_info = []
+        # We don't need to await the result here since the iterative_reasoning
+        # function itself will update the Telegram message as it progresses
+        asyncio.create_task(iterative_reasoning(question, max_attempts=3))
+        
+        logger.info(f"Started iterative reasoning for question: {question[:50]}...")
+        
+    except Exception as e:
+        logger.error(f"Error in reasoning command: {str(e)}")
+        await message.reply(f"Error starting reasoning process: {str(e)}")
+@dp.message(Command("discussionsummary"))
+async def cmd_discussion_summary(message: types.Message):
+    """Generate a comprehensive discussion summary with step-by-step analysis and error correction"""
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    
+    try:
+        # Parse command arguments
+        args = message.text.split()[1:] if len(message.text.split()) > 1 else []
+        
+        # Default values
+        chat_id = None
+        time_period = "24h"
+        
+        # Process arguments if any
+        for arg in args:
+            if arg.startswith("chat="):
+                try:
+                    chat_id = int(arg.split("=")[1])
+                except ValueError:
+                    await message.reply("Invalid chat ID format. Use numbers only.")
+                    return
+            elif arg in ["24h", "7d", "30d"]:
+                time_period = arg
+        
+        # Show options if no specific chat selected
+        if chat_id is None:
+            from telegram_ai_assistant.utils.db_utils import execute_sql_query
             
-            # Информация о типе контекста
-            context_type = result.get("context_type", "unknown")
-            if context_type == "database_query":
-                detailed_info.append("🔍 <b>Запрос к базе данных</b>")
-            elif context_type == "chat_history":
-                detailed_info.append("📜 <b>Использование истории чатов</b>")
-            elif context_type == "use_available_context":
-                detailed_info.append("📝 <b>Использование доступного контекста</b>")
+            # Get recent active chats
+            chats_query = """
+            SELECT 
+                chats.id, 
+                chats.chat_id, 
+                chats.chat_name, 
+                chats.is_active,
+                (SELECT COUNT(*) FROM messages WHERE messages.chat_id = chats.chat_id) as message_count,
+                (SELECT MAX(timestamp) FROM messages WHERE messages.chat_id = chats.chat_id) as last_message_time
+            FROM chats
+            WHERE chats.is_active = 1
+            ORDER BY last_message_time DESC
+            LIMIT 10
+            """
+            chats = await execute_sql_query(chats_query)
             
-            # Дополнительная информация об использованных данных
-            if result.get("additional_data_used"):
-                detailed_info.append("📊 Использованы данные из базы данных")
+            if not chats:
+                await message.reply("No active chats found in the database.")
+                return
             
-            if result.get("additional_chat_history_used"):
-                detailed_info.append("💬 Использована дополнительная история чатов")
-                
-            # Собираем детальный ответ
-            detailed_response = [
-                f"<b>Ваш вопрос:</b> {question}\n",
-                "\n".join(detailed_info),
-                "\n\n<b>Ответ:</b>",
-                result.get("answer", "Не удалось сформировать ответ на ваш вопрос. Пожалуйста, уточните запрос.")
-            ]
+            # Create inline keyboard with chat options
+            keyboard = []
+            for chat in chats:
+                chat_name = chat.get("chat_name") or f"Chat {chat.get('chat_id')}"
+                msg_count = chat.get("message_count", 0)
+                callback_data = f"summarize_chat:{chat.get('chat_id')}:{time_period}"
+                keyboard.append([InlineKeyboardButton(
+                    text=f"{chat_name} ({msg_count} messages)", 
+                    callback_data=callback_data
+                )])
             
-            await processing_msg.edit_text("\n".join(detailed_response), parse_mode="HTML")
+            # Add option for all chats
+            keyboard.append([InlineKeyboardButton(
+                text="📊 All active chats", 
+                callback_data=f"summarize_chat:all:{time_period}"
+            )])
+            
+            # Add time period options
+            keyboard.append([
+                InlineKeyboardButton(text="24 hours", callback_data=f"change_period:24h"),
+                InlineKeyboardButton(text="7 days", callback_data=f"change_period:7d"),
+                InlineKeyboardButton(text="30 days", callback_data=f"change_period:30d")
+            ])
+            
+            # Send message with options
+            await message.reply(
+                f"🔍 *Discussion Summary Generation*\n\n"
+                f"Please select a chat to analyze or choose 'All active chats'.\n"
+                f"Current time period: *{time_period}*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            )
         else:
-            # Простой ответ без деталей
-            if "answer" in result:
-                await processing_msg.edit_text(result["answer"])
-            else:
-                logger.warning("Missing 'answer' key in context processor result")
-                await processing_msg.edit_text("Не удалось сформировать ответ на ваш вопрос. Пожалуйста, уточните запрос.")
+            # Start the iterative summary process directly if chat ID provided
+            await message.reply(
+                f"🔍 *Starting iterative discussion summary for chat {chat_id}*\n\n"
+                f"Time period: *{time_period}*\n\n"
+                f"I'll guide you through the analysis process step by step, allowing corrections at each stage.",
+                parse_mode="Markdown"
+            )
             
-            # Логируем детали использованного контекста
-            logger.debug(f"Тип использованного контекста: {result.get('context_type')}")
-            logger.debug(f"Использованы данные из БД: {result.get('additional_data_used', False)}")
-            logger.debug(f"Использована история чатов: {result.get('additional_chat_history_used', False)}")
+            # Start the analysis process
+            asyncio.create_task(iterative_discussion_summary(chat_id, time_period))
+            
+            logger.info(f"Started iterative discussion summary for chat_id={chat_id}, period={time_period}")
             
     except Exception as e:
-        logger.error(f"Error processing contextual question: {str(e)}")
-        await processing_msg.edit_text(f"Произошла ошибка: {str(e)}")
+        logger.error(f"Error in discussion summary command: {str(e)}")
+        await message.reply(f"Error starting discussion summary: {str(e)}")
+
+@dp.callback_query(lambda c: c.data.startswith(("summarize_chat:", "change_period:", "try_different_period", "retry_", "continue_", "accept_", "refine_")))
+async def summary_callback_handler(callback_query: types.CallbackQuery):
+    """Handle callbacks for the iterative discussion summary feature"""
+    if callback_query.from_user.id != ADMIN_USER_ID:
+        await callback_query.answer("You are not authorized to use this feature.")
+        return
+    
+    try:
+        # Extract callback data
+        data = callback_query.data
+        logger.debug(f"Received callback: {data}")
+        
+        # Process different callback types
+        if data.startswith("summarize_chat:"):
+            # Format: summarize_chat:chat_id:time_period
+            parts = data.split(":")
+            if len(parts) >= 3:
+                chat_id_str = parts[1]
+                time_period = parts[2]
+                
+                chat_id = None if chat_id_str == "all" else int(chat_id_str)
+                
+                # Acknowledge the callback
+                await callback_query.answer("Starting analysis...")
+                
+                # Update message to show we're starting
+                chat_info = "all chats" if chat_id is None else f"chat {chat_id}"
+                await callback_query.message.edit_text(
+                    f"🔍 *Starting iterative discussion summary for {chat_info}*\n\n"
+                    f"Time period: *{time_period}*\n\n"
+                    f"I'll guide you through the analysis process step by step, allowing corrections at each stage.",
+                    parse_mode="Markdown"
+                )
+                
+                # Start the analysis process
+                asyncio.create_task(iterative_discussion_summary(chat_id, time_period))
+                
+                logger.info(f"Started iterative discussion summary for chat_id={chat_id}, period={time_period}")
+                
+        elif data.startswith("change_period:"):
+            # Format: change_period:new_period
+            parts = data.split(":")
+            if len(parts) >= 2:
+                new_period = parts[1]
+                
+                # Acknowledge the callback
+                await callback_query.answer(f"Changed time period to {new_period}")
+                
+                # Get current inline keyboard
+                current_keyboard = callback_query.message.reply_markup.inline_keyboard
+                
+                # Update only the period-related buttons (last row)
+                for i, row in enumerate(current_keyboard):
+                    for j, button in enumerate(row):
+                        if button.callback_data.startswith("summarize_chat:"):
+                            # Update button data with new period
+                            chat_part = button.callback_data.split(":")[1]
+                            current_keyboard[i][j].callback_data = f"summarize_chat:{chat_part}:{new_period}"
+                
+                # Set all period buttons to normal except the selected one
+                period_row = current_keyboard[-1]
+                for i, button in enumerate(period_row):
+                    period = button.callback_data.split(":")[-1]
+                    if period == new_period:
+                        period_row[i].text = f"✅ {button.text.replace('✅ ', '')}"
+                    else:
+                        period_row[i].text = button.text.replace('✅ ', '')
+                
+                # Update message with new time period
+                await callback_query.message.edit_text(
+                    f"🔍 *Discussion Summary Generation*\n\n"
+                    f"Please select a chat to analyze or choose 'All active chats'.\n"
+                    f"Current time period: *{new_period}*",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=current_keyboard)
+                )
+        
+        elif data == "try_different_period":
+            # Show period options
+            await callback_query.answer("Select a different time period")
+            
+            keyboard = [
+                [InlineKeyboardButton(text="24 hours", callback_data="retry_with_period:24h")],
+                [InlineKeyboardButton(text="3 days", callback_data="retry_with_period:3d")],
+                [InlineKeyboardButton(text="7 days", callback_data="retry_with_period:7d")],
+                [InlineKeyboardButton(text="14 days", callback_data="retry_with_period:14d")],
+                [InlineKeyboardButton(text="30 days", callback_data="retry_with_period:30d")]
+            ]
+            
+            await callback_query.message.edit_text(
+                "📅 *Select Different Time Period*\n\n"
+                "No messages were found in the current time period.\n"
+                "Please select a different time period to analyze:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            )
+        
+        elif data.startswith("retry_with_period:"):
+            # Extract new period
+            new_period = data.split(":")[1]
+            
+            # Get chat ID from message context if available
+            message_text = callback_query.message.text
+            chat_id = None
+            
+            if "chat " in message_text and " failed" in message_text:
+                # Try to extract chat ID from message
+                try:
+                    chat_match = re.search(r"chat (\d+)", message_text)
+                    if chat_match:
+                        chat_id = int(chat_match.group(1))
+                except ValueError:
+                    chat_id = None
+            
+            # Acknowledge the callback
+            await callback_query.answer(f"Retrying with {new_period}")
+            
+            # Update message
+            await callback_query.message.edit_text(
+                f"🔄 *Retrying Summary*\n\n"
+                f"Attempting to generate summary with new time period: {new_period}",
+                parse_mode="Markdown"
+            )
+            
+            # Start new analysis with different period
+            asyncio.create_task(iterative_discussion_summary(chat_id, new_period))
+            
+            logger.info(f"Retrying iterative discussion summary for chat_id={chat_id}, period={new_period}")
+        
+        elif data.startswith("retry_") or data.startswith("continue_") or data.startswith("accept_") or data.startswith("refine_"):
+            # These callbacks are handled directly by the iterative_discussion_summary function
+            # Just acknowledge the callback
+            await callback_query.answer("Processing...")
+            
+            # The actual handling is done by updating the state in the iterative_discussion_summary function
+            # We'll just log the callback for now
+            logger.info(f"Received '{data}' callback, will be processed by the summary function")
+            
+            # Special handling for refine_topics and refine_summary - show input prompt
+            if data == "refine_topics":
+                # Create a temporary state for this conversation
+                state = dp.current_state(chat=callback_query.message.chat.id, user=callback_query.from_user.id)
+                await state.set_state("waiting_for_topic_refinement")
+                await state.update_data(message_id=callback_query.message.message_id)
+                
+                await callback_query.message.reply(
+                    "✏️ *Refine Topics*\n\n"
+                    "Please provide your suggestions for how to improve the topic analysis. For example:\n"
+                    "- Add missing topics\n"
+                    "- Remove irrelevant topics\n"
+                    "- Refocus the analysis\n\n"
+                    "Type your suggestions below:",
+                    parse_mode="Markdown"
+                )
+            
+            elif data == "refine_summary":
+                # Create a temporary state for this conversation
+                state = dp.current_state(chat=callback_query.message.chat.id, user=callback_query.from_user.id)
+                await state.set_state("waiting_for_summary_refinement")
+                await state.update_data(message_id=callback_query.message.message_id)
+                
+                await callback_query.message.reply(
+                    "✏️ *Refine Summary*\n\n"
+                    "Please provide your suggestions for how to improve the final summary. For example:\n"
+                    "- Add missing information\n"
+                    "- Focus on specific aspects\n"
+                    "- Change the tone or style\n\n"
+                    "Type your suggestions below:",
+                    parse_mode="Markdown"
+                )
+            
+    except Exception as e:
+        logger.error(f"Error handling summary callback: {str(e)}")
+        await callback_query.answer(f"Error: {str(e)}", show_alert=True)
+
+# State handlers for refinement inputs
+@dp.message(lambda message: message.text and message.from_user.id == ADMIN_USER_ID)
+async def process_refinement_input(message: types.Message, state: FSMContext):
+    """Process user input for topic or summary refinement"""
+    current_state = await state.get_state()
+    
+    if current_state == "waiting_for_topic_refinement":
+        # Process topic refinement
+        user_input = message.text
+        state_data = await state.get_data()
+        message_id = state_data.get("message_id")
+        
+        await message.reply(
+            "🔄 *Processing Topic Refinement*\n\n"
+            "Thank you for your input. I'm updating the topic analysis with your suggestions.",
+            parse_mode="Markdown"
+        )
+        
+        # Reset the state
+        await state.clear()
+        
+        # TODO: Process the refinement in the ongoing summary analysis
+        logger.info(f"Received topic refinement: {user_input}")
+        
+    elif current_state == "waiting_for_summary_refinement":
+        # Process summary refinement
+        user_input = message.text
+        state_data = await state.get_data()
+        message_id = state_data.get("message_id")
+        
+        await message.reply(
+            "🔄 *Processing Summary Refinement*\n\n"
+            "Thank you for your input. I'm updating the final summary with your suggestions.",
+            parse_mode="Markdown"
+        )
+        
+        # Reset the state
+        await state.clear()
+        
+        # TODO: Process the refinement in the ongoing summary analysis
+        logger.info(f"Received summary refinement: {user_input}")
+
 @dp.message()
 async def handle_message(message: types.Message):
     """Process regular messages"""
@@ -1016,6 +1381,39 @@ async def callback_cancel_task(callback_query: types.CallbackQuery):
     task_confirmation_data.pop(user_id, None)
     if user_id in user_states and user_states[user_id] == AWAITING_TASK_CONFIRMATION:
         user_states.pop(user_id)
+
+@dp.message(Command("agent"))
+async def cmd_ai_agent(message: types.Message):
+    """Use the autonomous AI agent to answer any question by planning and executing DB queries"""
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    
+    try:
+        # Get the question from the message text (remove the /agent command)
+        command_parts = message.text.split(maxsplit=1)
+        if len(command_parts) < 2:
+            await message.reply(
+                "Please provide a question for the AI agent to answer.\n"
+                "Example: /agent What were the most active chats in the last week?"
+            )
+            return
+        
+        question = command_parts[1].strip()
+        
+        # Let the user know we're starting the autonomous reasoning process
+        await message.reply(
+            "🤖 Starting autonomous AI agent process for your question...\n"
+            "The agent will plan and execute database queries to find the answer."
+        )
+        
+        # Start the autonomous agent
+        asyncio.create_task(ai_agent_query(question))
+        
+        logger.info(f"Started autonomous AI agent for question: {question[:50]}...")
+        
+    except Exception as e:
+        logger.error(f"Error starting AI agent: {str(e)}")
+        await message.reply(f"Error starting the AI agent process: {str(e)}")
 
 async def check_reminders_periodically():
     """Periodically check for unanswered questions and send reminders"""

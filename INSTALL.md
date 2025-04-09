@@ -9,7 +9,7 @@ Before you begin, make sure you have:
 1. Python 3.8 or higher installed
 2. Access to a Telegram account (for the userbot)
 3. A Telegram bot token (create one via [@BotFather](https://t.me/BotFather))
-4. OpenAI API key with access to GPT-4o
+4. OpenAI API key with access to o3-mini
 5. (Optional) Linear.app API key for task management
 
 ## Step 1: Get Telegram API Credentials
