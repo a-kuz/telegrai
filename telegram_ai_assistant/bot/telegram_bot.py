@@ -18,7 +18,8 @@ from utils.db_utils import (
     get_pending_reminders, 
     update_reminder_sent,
     get_tasks_by_due_date,
-    get_team_productivity
+    get_team_productivity,
+    get_user_chats
 )
 from ai_module.ai_analyzer import (
     generate_chat_summary, 
@@ -45,6 +46,7 @@ async def cmd_start(message: types.Message):
         await message.reply("Sorry, this bot is private.")
         logger.info(f"Unauthorized access attempt from user ID: {message.from_user.id}")
         return
+    
     logger.info(f"Start command received from admin user {ADMIN_USER_ID}")
     await message.reply(
         "👋 Hello! I'm your AI assistant for Telegram work chats.\n\n"
@@ -54,6 +56,7 @@ async def cmd_start(message: types.Message):
         "/summary - Get a summary of recent conversations\n"
         "/tasks - Show pending tasks\n"
         "/reminders - Check for unanswered questions\n"
+        "/chats - List your available chats\n"
         "/teamreport - View team productivity report\n"
         "/help - Show all available commands"
     )
@@ -62,15 +65,18 @@ async def cmd_help(message: types.Message):
     """Handle /help command"""
     if message.from_user.id != ADMIN_USER_ID:
         return
+    
     help_text = (
         "📋 <b>Available Commands</b>\n\n"
         "/summary [chat_name] - Generate summary of recent conversations\n"
         "/tasks - Show pending tasks in Linear\n"
         "/reminders - Check for unanswered questions\n"
         "/teamreport - View team productivity report\n"
+        "/chats - List your available chats\n"
         "/createtask - Create a new task in Linear\n"
         "/respond [chat_id] [message_id] - Respond to a message\n"
     )
+    
     await message.reply(help_text, parse_mode="HTML")
 @dp.message(Command("summary"))
 async def cmd_summary(message: types.Message):
@@ -214,120 +220,250 @@ async def cmd_createtask(message: types.Message):
         "Let's create a new task in Linear.\n\n"
         "Please enter the task title:"
     )
+@dp.message(Command("chats"))
+async def cmd_chats(message: types.Message):
+    """Show the list of user's chats"""
+    if message.from_user.id != ADMIN_USER_ID:
+        logger.info(f"Unauthorized chats list request from user ID: {message.from_user.id}")
+        return
+    
+    logger.info(f"Chats list requested by user {message.from_user.id}")
+    processing_msg = await message.reply("Fetching your chats...")
+    
+    try:
+        # Get all chats for the user
+        chats = await get_user_chats(message.from_user.id)
+        
+        if not chats:
+            await processing_msg.edit_text("You don't have any chats yet.")
+            return
+        
+        # Format the chat list
+        chat_list = ["📃 <b>Your Chats</b>\n"]
+        
+        for chat in chats:
+            chat_name = chat["chat_name"] if chat["chat_name"] else f"Chat {chat['chat_id']}"
+            status = "✅ Active" if chat["is_active"] else "❌ Inactive"
+            
+            # Format last message time
+            last_activity = "Never"
+            if chat.get("last_message_time"):
+                last_message_time = chat["last_message_time"]
+                delta = datetime.utcnow() - last_message_time
+                if delta.days > 0:
+                    last_activity = f"{delta.days} days ago"
+                elif delta.seconds >= 3600:
+                    last_activity = f"{delta.seconds // 3600} hours ago"
+                else:
+                    last_activity = f"{delta.seconds // 60} minutes ago"
+            
+            chat_info = (
+                f"• <b>{chat_name}</b>\n"
+                f"  ID: {chat['chat_id']}\n"
+                f"  Status: {status}\n"
+                f"  Messages: {chat.get('message_count', 0)}\n"
+                f"  Last activity: {last_activity}\n"
+            )
+            chat_list.append(chat_info)
+        
+        await processing_msg.edit_text("\n".join(chat_list), parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Error retrieving chats: {str(e)}")
+        await processing_msg.edit_text(f"Error retrieving chats: {str(e)}")
 @dp.message()
 async def handle_all_messages(message: types.Message):
     """Handle all regular messages, including task creation steps and questions"""
     user_id = message.from_user.id
+    
+    # Only process messages from admin
     if user_id != ADMIN_USER_ID:
         return
+    
+    # Check if user is in task creation flow
     current_state = user_states.get(user_id)
+    
     if current_state == AWAITING_TASK_TITLE:
+        # User is entering task title
         task_title = message.text.strip()
+        
         if task_title:
+            # Store the title
             task_creation_data[user_id]["title"] = task_title
+            
+            # Move to next state
             user_states[user_id] = AWAITING_TASK_DESCRIPTION
+            
+            # Ask for description
             await message.reply(
                 "Got it! Now please enter the task description (or type /skip for no description):"
             )
         else:
             await message.reply("Please enter a valid task title.")
+    
     elif current_state == AWAITING_TASK_DESCRIPTION:
+        # User is entering task description
         task_description = message.text.strip()
+        
         if task_description == "/skip":
             task_description = ""
+        
+        # Store the description
         task_creation_data[user_id]["description"] = task_description
+        
+        # Reset state
         user_states.pop(user_id)
+        
+        # Create the task
         await message.reply("Creating task in Linear...")
+        
         try:
+            # Get team ID
             team_id = await linear_client.get_team_id_for_chat(message.chat.id)
+            
             if not team_id:
                 team_id = LINEAR_TEAM_MAPPING.get("default")
+                
             if not team_id:
                 await message.reply("❌ Error: Could not determine which Linear team to assign this task to.")
                 return
+            
+            # Create issue in Linear
             issue = await linear_client.create_issue(
                 title=task_creation_data[user_id]["title"],
                 description=task_creation_data[user_id]["description"],
                 team_id=team_id
             )
+            
+            # Send confirmation
             await message.reply(
                 f"✅ Task created in Linear!\n\n"
-                f"<b>{issue.get('title')}</b>\n"
-                f"ID: {issue.get('identifier')}\n"
-                f"URL: {issue.get('url')}\n",
+                f"<b>Title:</b> {issue.get('title')}\n"
+                f"<b>ID:</b> {issue.get('identifier')}\n"
+                f"<b>URL:</b> {issue.get('url')}",
                 parse_mode="HTML"
             )
+            
+            # Clean up
             del task_creation_data[user_id]
+            
         except Exception as e:
             logger.error(f"Error creating Linear task: {str(e)}")
-            await message.reply(f"❌ Error creating task in Linear: {str(e)}")
-            user_states.pop(user_id, None)
+            await message.reply(f"Error creating Linear task: {str(e)}")
             task_creation_data.pop(user_id, None)
     else:
+        # Check if the message appears to be a command in natural language
         text = message.text.lower()
-        if any(pattern in text for pattern in ['create task', 'add task', 'new task', 'create a task', 'add a task']):
+        
+        # Chat related commands
+        if any(pattern in text for pattern in [
+            'my chats', 'list chats', 'show chats', 'what chats', 'which chats', 'available chats',
+            'chats do i have', 'show my chats', 'my chat list', 'какие у меня чаты', 'мои чаты',
+            'список чатов', 'покажи чаты', 'какие чаты'
+        ]):
+            await cmd_chats(message)
+            return
+        
+        # Task related commands
+        elif any(pattern in text for pattern in ['create task', 'add task', 'new task', 'create a task', 'add a task']):
             await cmd_createtask(message)
             return
-        elif any(pattern in text for pattern in ['show tasks', 'list tasks', 'my tasks', 'show my tasks', 'what tasks', 'pending tasks']):
+        elif any(pattern in text for pattern in ['my tasks', 'list tasks', 'show tasks', 'pending tasks', 'task list']):
             await cmd_tasks(message)
             return
+            
+        # Summary related commands    
         elif any(pattern in text for pattern in ['show summary', 'get summary', 'summarize', 'chat summary', 'conversation summary']):
             await cmd_summary(message)
             return
+            
+        # Reminder related commands
         elif any(pattern in text for pattern in ['show reminders', 'list reminders', 'pending questions', 'unanswered questions']):
             await cmd_reminders(message)
             return
+            
+        # Team report commands
         elif any(pattern in text for pattern in ['team report', 'productivity report', 'show report', 'team productivity']):
             await cmd_teamreport(message)
             return
+            
+        # Help commands
         elif ('help' in text and any(word in text for word in ['show', 'get', 'what', 'how', 'commands'])) or text == 'help':
             await cmd_help(message)
             return
+            
+        # Try to interpret the intent using AI if no direct command match
         elif any(intent_word in text for intent_word in ['show', 'list', 'get', 'create', 'make', 'add', 'find']):
             try:
+                # Use OpenAI to determine the user's intent
                 system_prompt = """
                 Determine which command the user is trying to access with their natural language request.
-                The available commands are:
+                Pay special attention to requests about chats, conversations, or message groups.
+                
+                Choose from the following commands:
+                - chats - Show user's chats list (PRIORITY: If the query is about "what chats", "my chats", "available chats", etc.)
+                - summary - Generate a summary of recent conversations
                 - tasks - Show pending tasks
-                - summary - Get a summary of recent conversations
                 - reminders - Check for unanswered questions
                 - teamreport - View team productivity report
                 - createtask - Create a new task
                 - help - Show all available commands
+                
+                If the query mentions "chats", "conversations", "dialogs", or similar terms related to messaging, prioritize returning "chats".
+                
                 Return ONLY the command name and nothing else.
                 """
+                
                 response = await client.chat.completions.create(
                     model=OPENAI_MODEL,
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": text}
+                        {"role": "user", "content": message.text}
                     ]
                 )
+                
                 detected_command = response.choices[0].message.content.strip().lower()
+                
+                # Execute the detected command
                 if detected_command == 'tasks':
                     await cmd_tasks(message)
-                    return
                 elif detected_command == 'summary':
                     await cmd_summary(message)
-                    return
                 elif detected_command == 'reminders':
                     await cmd_reminders(message)
-                    return
                 elif detected_command == 'teamreport':
                     await cmd_teamreport(message)
-                    return
+                elif detected_command == 'chats':
+                    await cmd_chats(message)
                 elif detected_command == 'createtask':
                     await cmd_createtask(message)
-                    return
                 elif detected_command == 'help':
                     await cmd_help(message)
-                    return
+                
             except Exception as e:
                 logger.error(f"Error detecting command with AI: {str(e)}")
+                # Fall through to question answering
+                
+        # For any other message, assume it's a question and generate a response using AI
         try:
+            # First, check if this is about chats but wasn't caught by our patterns
+            # This is a direct override to handle common chat queries that might otherwise
+            # go to the general AI response
+            if any(word in text for word in ['chat', 'чат', 'conversation', 'dialog']) and \
+               any(word in text for word in ['my', 'mine', 'have', 'list', 'show', 'мои', 'есть', 'список', 'покажи']):
+                logger.info("Detected chat-related query via keywords, redirecting to chat command")
+                await cmd_chats(message)
+                return
+                
+            # Show typing indicator to user
             await bot.send_chat_action(message.chat.id, 'typing')
+            
+            # Get AI-generated response
             ai_response = await suggest_response(message.text)
+            
+            # Reply with the generated response
             await message.reply(ai_response)
+            
         except Exception as e:
             logger.error(f"Error generating AI response: {str(e)}")
             await message.reply("I'm having trouble processing that right now. Please try again later.")
@@ -519,11 +655,21 @@ async def send_reminder(reminder):
         logger.error(f"Error sending reminder: {str(e)}")
 async def start_bot():
     """Start the bot and background tasks"""
+    # Log startup
     log_startup("Telegram Bot")
     logger.info(f"Bot starting with token: {BOT_TOKEN[:5]}...")
     logger.info(f"Admin user ID: {ADMIN_USER_ID}")
+    
+    # Initialize database
+    from telegram_ai_assistant.utils.db_models import init_db
+    logger.info("Initializing database...")
+    init_db()
+    
+    # Start the reminder checker as a background task
     logger.info("Starting background tasks")
     asyncio.create_task(check_reminders_periodically())
+    
+    # Start polling
     logger.info("Starting bot polling")
     await dp.start_polling(bot)
 if __name__ == "__main__":

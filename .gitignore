@@ -8,6 +8,7 @@ env/
 venv/
 ENV/
 env.bak/
+logs
 venv.bak/
 *.egg-info/
 dist/

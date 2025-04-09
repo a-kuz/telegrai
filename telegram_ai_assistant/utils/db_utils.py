@@ -319,4 +319,93 @@ async def get_team_productivity(days=7):
             })
         return result
     finally:
+        session.close()
+async def get_user_chats(user_id=None):
+    """
+    Get all chats for a user or all chats if user_id is None
+    
+    Args:
+        user_id (int, optional): The user ID to filter chats for. If None, returns all chats.
+    
+    Returns:
+        list: List of chat objects with their details
+    """
+    session = SessionLocal()
+    try:
+        logger.debug(f"Getting chats for user {user_id if user_id else 'all users'}")
+        
+        # If user_id provided, get only chats where the user has messages
+        if user_id:
+            # Get all chat_ids where user has sent messages
+            chat_ids_query = session.query(Message.chat_id).filter(
+                Message.sender_id == user_id
+            ).distinct()
+            
+            # Log the query for debugging
+            logger.debug(f"Query for user's chat_ids: {str(chat_ids_query)}")
+            
+            # Execute the query
+            chat_ids_result = chat_ids_query.all()
+            chat_ids = [chat_id[0] for chat_id in chat_ids_result]
+            
+            logger.debug(f"Found {len(chat_ids)} chat_ids for user {user_id}: {chat_ids}")
+            
+            if not chat_ids:
+                logger.warning(f"No chats found for user {user_id}")
+                return []
+            
+            # Fetch all chats that exist in the database
+            chats = session.query(Chat).filter(Chat.chat_id.in_(chat_ids)).all()
+            
+            # Check for any chat_ids that don't have corresponding Chat records
+            existing_chat_ids = [chat.chat_id for chat in chats]
+            missing_chat_ids = set(chat_ids) - set(existing_chat_ids)
+            
+            logger.debug(f"Missing chat records for chat_ids: {missing_chat_ids}")
+            
+            # Create placeholder Chat objects for missing chats
+            for chat_id in missing_chat_ids:
+                placeholder_chat = Chat(
+                    chat_id=chat_id,
+                    chat_name=f"Unknown Chat {chat_id}",
+                    is_active=True,
+                    last_summary_time=datetime.utcnow()
+                )
+                chats.append(placeholder_chat)
+        else:
+            # Get all chats
+            chats = session.query(Chat).order_by(Chat.chat_name).all()
+        
+        # Get message counts for each chat
+        result = []
+        for chat in chats:
+            # Count messages in this chat
+            message_count = session.query(func.count(Message.id)).filter(
+                Message.chat_id == chat.chat_id
+            ).scalar() or 0
+            
+            # Get last message time
+            last_message = session.query(Message).filter(
+                Message.chat_id == chat.chat_id
+            ).order_by(Message.timestamp.desc()).first()
+            
+            last_message_time = last_message.timestamp if last_message else None
+            
+            result.append({
+                "id": chat.id if hasattr(chat, 'id') else None,
+                "chat_id": chat.chat_id,
+                "chat_name": chat.chat_name or f"Chat {chat.chat_id}",
+                "is_active": chat.is_active,
+                "last_summary_time": chat.last_summary_time,
+                "linear_team_id": chat.linear_team_id if hasattr(chat, 'linear_team_id') else None,
+                "message_count": message_count,
+                "last_message_time": last_message_time
+            })
+        
+        logger.debug(f"Retrieved {len(result)} chats")
+        return result
+    except Exception as e:
+        logger.error(f"Error retrieving chats: {str(e)}", exc_info=True)
+        return []  # Return empty list instead of raising exception
+    finally:
         session.close() 
