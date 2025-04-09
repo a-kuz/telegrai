@@ -1,0 +1,1 @@
+cd /srv/app && screen -S telegram_bot -d -m bash -c "source venv/bin/activate && python3 -m telegram_ai_assistant.main --mode bot"
