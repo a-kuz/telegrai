@@ -6,48 +6,35 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, func, and_
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.future import select
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from telegram_ai_assistant.config import DB_URI
 from utils.db_models import Chat, User, Message, Task, UnansweredQuestion, TeamProductivity, Base
 from utils.logging_utils import setup_db_logger
-
-# Setup component logger
 logger = setup_db_logger()
-
 engine = create_engine(DB_URI)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 async def store_message(chat_id, chat_name, message_id, sender_id, sender_name, 
-                        text, attachments=None, timestamp=None):
+                        text, attachments=None, timestamp=None, is_bot=False):
     session = SessionLocal()
     try:
         logger.debug(f"Storing message {message_id} from chat {chat_id}")
-        # Check if chat exists, if not create it
         chat = session.query(Chat).filter(Chat.chat_id == chat_id).first()
         if not chat:
             logger.info(f"Creating new chat record for chat_id {chat_id} ({chat_name})")
             chat = Chat(chat_id=chat_id, chat_name=chat_name)
             session.add(chat)
             session.flush()
-        
-        # Check if user exists, if not create it
         user = session.query(User).filter(User.user_id == sender_id).first()
         if not user:
-            # Parse first_name and last_name if needed
             name_parts = sender_name.split(maxsplit=1)
             first_name = name_parts[0] if name_parts else ""
             last_name = name_parts[1] if len(name_parts) > 1 else ""
-            
             logger.info(f"Creating new user record for user_id {sender_id} ({sender_name})")
-            user = User(user_id=sender_id, first_name=first_name, last_name=last_name)
+            user = User(user_id=sender_id, first_name=first_name, last_name=last_name, is_bot=is_bot)
             session.add(user)
             session.flush()
-        
-        # Create and store the message
         attachments_json = json.dumps(attachments) if attachments else "[]"
         message_time = timestamp if timestamp else datetime.utcnow()
-        
         message = Message(
             message_id=message_id,
             chat_id=chat_id,
@@ -57,18 +44,15 @@ async def store_message(chat_id, chat_name, message_id, sender_id, sender_name,
             timestamp=message_time,
             is_important=False,
             is_processed=False,
-            category="default"
+            category="default",
+            is_bot=is_bot
         )
-        
         session.add(message)
-        
-        # Update productivity stats
         today = datetime.utcnow().date()
         productivity = session.query(TeamProductivity).filter(
             TeamProductivity.user_id == sender_id,
             func.date(TeamProductivity.date) == today
         ).first()
-        
         if productivity:
             productivity.message_count += 1
         else:
@@ -79,7 +63,6 @@ async def store_message(chat_id, chat_name, message_id, sender_id, sender_name,
                 message_count=1
             )
             session.add(productivity)
-        
         session.commit()
         logger.debug(f"Successfully stored message {message_id} with internal ID {message.id}")
         return message.id
@@ -89,7 +72,6 @@ async def store_message(chat_id, chat_name, message_id, sender_id, sender_name,
         raise e
     finally:
         session.close()
-
 async def get_recent_chat_messages(chat_id, hours=24, limit=100):
     session = SessionLocal()
     try:
@@ -99,7 +81,6 @@ async def get_recent_chat_messages(chat_id, hours=24, limit=100):
             Message.chat_id == chat_id,
             Message.timestamp >= cutoff_time
         ).order_by(Message.timestamp.desc()).limit(limit).all()
-        
         result = [
             {
                 "id": msg.id,
@@ -120,7 +101,6 @@ async def get_recent_chat_messages(chat_id, hours=24, limit=100):
         raise e
     finally:
         session.close()
-
 async def mark_question_as_answered(message_id, chat_id):
     session = SessionLocal()
     try:
@@ -129,7 +109,6 @@ async def mark_question_as_answered(message_id, chat_id):
             UnansweredQuestion.message_id == message_id,
             UnansweredQuestion.chat_id == chat_id
         ).first()
-        
         if question:
             question.is_answered = True
             session.commit()
@@ -142,17 +121,21 @@ async def mark_question_as_answered(message_id, chat_id):
         raise e
     finally:
         session.close()
-
-async def store_unanswered_question(message_id, chat_id, target_user_id, question_text):
+async def store_unanswered_question(message_id, chat_id, target_user_id, question_text, sender_id=None, is_bot=False):
     session = SessionLocal()
     try:
         logger.debug(f"Storing unanswered question from message {message_id} in chat {chat_id}")
+        if is_bot:
+            logger.info(f"Skipping question from bot (message {message_id})")
+            return None
         question = UnansweredQuestion(
             message_id=message_id,
             chat_id=chat_id,
             target_user_id=target_user_id,
             question=question_text,
-            asked_at=datetime.utcnow()
+            asked_at=datetime.utcnow(),
+            sender_id=sender_id,
+            is_bot=is_bot
         )
         session.add(question)
         session.commit()
@@ -164,7 +147,6 @@ async def store_unanswered_question(message_id, chat_id, target_user_id, questio
         raise e
     finally:
         session.close()
-
 async def get_pending_reminders(user_id, hours_threshold=1):
     session = SessionLocal()
     try:
@@ -175,7 +157,6 @@ async def get_pending_reminders(user_id, hours_threshold=1):
             UnansweredQuestion.is_answered == False,
             UnansweredQuestion.asked_at <= cutoff_time
         ).all()
-        
         result = [
             {
                 "id": q.id,
@@ -183,7 +164,9 @@ async def get_pending_reminders(user_id, hours_threshold=1):
                 "chat_id": q.chat_id,
                 "question": q.question,
                 "asked_at": q.asked_at,
-                "reminder_count": q.reminder_count
+                "reminder_count": q.reminder_count,
+                "sender_id": q.sender_id,
+                "is_bot": q.is_bot if hasattr(q, 'is_bot') else False
             }
             for q in questions
         ]
@@ -194,7 +177,6 @@ async def get_pending_reminders(user_id, hours_threshold=1):
         raise e
     finally:
         session.close()
-
 async def update_reminder_sent(question_id):
     session = SessionLocal()
     try:
@@ -202,7 +184,6 @@ async def update_reminder_sent(question_id):
         question = session.query(UnansweredQuestion).filter(
             UnansweredQuestion.id == question_id
         ).first()
-        
         if question:
             question.last_reminder_at = datetime.utcnow()
             question.reminder_count += 1
@@ -216,7 +197,6 @@ async def update_reminder_sent(question_id):
         raise e
     finally:
         session.close()
-
 async def store_task(title, description, linear_id, status, assignee_id=None, 
                     due_date=None, message_id=None, chat_id=None):
     session = SessionLocal()
@@ -233,15 +213,12 @@ async def store_task(title, description, linear_id, status, assignee_id=None,
             created_at=datetime.utcnow()
         )
         session.add(task)
-        
         if assignee_id:
-            # Update productivity stats for task creation
             today = datetime.utcnow().date()
             productivity = session.query(TeamProductivity).filter(
                 TeamProductivity.user_id == assignee_id,
                 func.date(TeamProductivity.date) == today
             ).first()
-            
             if productivity:
                 productivity.tasks_created += 1
             else:
@@ -252,7 +229,6 @@ async def store_task(title, description, linear_id, status, assignee_id=None,
                     tasks_created=1
                 )
                 session.add(productivity)
-        
         session.commit()
         return task.id
     except Exception as e:
@@ -260,7 +236,6 @@ async def store_task(title, description, linear_id, status, assignee_id=None,
         raise e
     finally:
         session.close()
-
 async def update_task_status(linear_id, new_status):
     session = SessionLocal()
     try:
@@ -268,8 +243,6 @@ async def update_task_status(linear_id, new_status):
         if task:
             old_status = task.status
             task.status = new_status
-            
-            # If task is being marked as completed, update productivity stats
             if new_status.lower() in ["done", "completed", "merged"] and old_status.lower() not in ["done", "completed", "merged"]:
                 if task.assignee_id:
                     today = datetime.utcnow().date()
@@ -277,7 +250,6 @@ async def update_task_status(linear_id, new_status):
                         TeamProductivity.user_id == task.assignee_id,
                         func.date(TeamProductivity.date) == today
                     ).first()
-                    
                     if productivity:
                         productivity.tasks_completed += 1
                     else:
@@ -288,26 +260,21 @@ async def update_task_status(linear_id, new_status):
                             tasks_completed=1
                         )
                         session.add(productivity)
-            
             session.commit()
             return True
         return False
     finally:
         session.close()
-
 async def get_tasks_by_due_date(days=1):
     session = SessionLocal()
     try:
-        # Get tasks due within the next X days
         today = datetime.utcnow().date()
         cutoff_date = today + timedelta(days=days)
-        
         tasks = session.query(Task).filter(
             Task.due_date <= cutoff_date,
             Task.due_date >= today,
             Task.status.notin_(["Done", "Completed", "Merged"])
         ).all()
-        
         return [
             {
                 "id": task.id,
@@ -323,12 +290,10 @@ async def get_tasks_by_due_date(days=1):
         ]
     finally:
         session.close()
-
 async def get_team_productivity(days=7):
     session = SessionLocal()
     try:
         cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
         productivity_data = session.query(
             TeamProductivity.user_id,
             func.sum(TeamProductivity.message_count).label("total_messages"),
@@ -340,12 +305,10 @@ async def get_team_productivity(days=7):
         ).group_by(
             TeamProductivity.user_id
         ).all()
-        
         result = []
         for item in productivity_data:
             user = session.query(User).filter(User.user_id == item.user_id).first()
             user_name = f"{user.first_name} {user.last_name}".strip() if user else "Unknown"
-            
             result.append({
                 "user_id": item.user_id,
                 "name": user_name,
@@ -354,7 +317,6 @@ async def get_team_productivity(days=7):
                 "tasks_completed": item.total_tasks_completed,
                 "avg_response_time": item.avg_response_time
             })
-        
         return result
     finally:
         session.close() 

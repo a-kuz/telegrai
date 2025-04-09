@@ -5,67 +5,67 @@
 
   
   <br>
-  <h3>Умный AI-ассистент для Telegram</h3>
-  <p>Мониторит чаты, отслеживает задачи, напоминает о вопросах и создает сводки</p>
+  <h3>Smart AI Assistant for Telegram</h3>
+  <p>Monitors chats, tracks tasks, reminds about questions, and creates summaries</p>
 </div>
 
-## 📱 Обзор
+## 📱 Overview
 
-Telegram AI Assistant - это мощный инструмент для продуктивной работы с Telegram чатами. Он использует искусственный интеллект для анализа сообщений, отслеживания задач, вопросов и важной информации, что позволяет не упустить ничего важного в потоке сообщений.
+Telegram AI Assistant is a powerful tool for productive work with Telegram chats. It uses artificial intelligence to analyze messages, track tasks, questions, and important information, ensuring nothing important is missed in the flow of messages.
 
-## ✨ Основные возможности
+## ✨ Key Features
 
-- **Пассивный мониторинг чатов** - читает сообщения во всех или выбранных чатах без отправки сообщений от вашего имени
-- **AI-анализ контента** - использует OpenAI GPT-4o для понимания контекста сообщений, изображений и ссылок
-- **Управление задачами** - автоматически обнаруживает задачи в сообщениях и создает их в Linear
-- **Отслеживание вопросов** - выявляет вопросы, адресованные вам, и напоминает о неотвеченных
-- **Автоматические сводки** - генерирует краткие отчеты о обсуждениях в чатах
-- **Аналитика активности** - отслеживает вовлеченность и активность команды
-- **Двухкомпонентная архитектура**:
-  - Userbot (клиент пользователя) для чтения сообщений из вашего аккаунта
-  - Бот для взаимодействия с вами и отображения результатов
+- **Passive chat monitoring** - reads messages in all or selected chats without sending messages on your behalf
+- **AI content analysis** - uses OpenAI GPT-4o to understand the context of messages, images, and links
+- **Task management** - automatically detects tasks in messages and creates them in Linear
+- **Question tracking** - identifies questions directed at you and reminds you of unanswered ones
+- **Automatic summaries** - generates brief reports on discussions in chats
+- **Activity analytics** - tracks team engagement and activity
+- **Two-component architecture**:
+  - Userbot (user client) for reading messages from your account
+  - Bot for interacting with you and displaying results
 
-## 🏗️ Архитектура системы
+## 🏗️ System Architecture
 
-![Архитектура](https://i.imgur.com/jUw5XTl.png)
+![Architecture](https://i.imgur.com/jUw5XTl.png)
 
-Система состоит из нескольких компонентов:
+The system consists of several components:
 
-1. **Telegram Userbot** - использует Telethon для чтения сообщений из вашего аккаунта
-2. **AI-модуль** - анализирует содержимое сообщений с помощью OpenAI GPT-4o
-3. **Linear-интеграция** - управляет задачами в трекере Linear
-4. **Telegram Бот** - предоставляет интерфейс для взаимодействия с системой
-5. **База данных** - хранит сообщения, задачи и другие данные
+1. **Telegram Userbot** - uses Telethon to read messages from your account
+2. **AI module** - analyzes message content using OpenAI GPT-4o
+3. **Linear integration** - manages tasks in the Linear tracker
+4. **Telegram Bot** - provides an interface for interacting with the system
+5. **Database** - stores messages, tasks, and other data
 
-## 🧩 Примеры использования
+## 🧩 Usage Examples
 
-### Мониторинг чатов
+### Chat Monitoring
 
-Ассистент может мониторить все ваши чаты или только выбранные:
+The assistant can monitor all your chats or only selected ones:
 
 ```
-# Мониторинг всех чатов
+# Monitor all chats
 MONITORED_CHATS=[]
 
-# Мониторинг конкретных чатов
+# Monitor specific chats
 MONITORED_CHATS=[-100123456789, -100987654321]
 ```
 
-### Команды бота
+### Bot Commands
 
-![Примеры команд бота](https://i.imgur.com/bQVyZIw.png)
+![Bot Command Examples](https://i.imgur.com/bQVyZIw.png)
 
-Бот поддерживает следующие команды:
+The bot supports the following commands:
 
-- `/start` - Инициализация бота
-- `/help` - Показать доступные команды
-- `/summary [chat_name]` - Получить сводку последних разговоров (опционально из конкретного чата)
-- `/tasks` - Показать ожидающие задачи из Linear
-- `/reminders` - Проверить неотвеченные вопросы
-- `/teamreport` - Посмотреть отчет о продуктивности команды
-- `/createtask` - Вручную создать новую задачу в Linear
+- `/start` - Initialize the bot
+- `/help` - Show available commands
+- `/summary [chat_name]` - Get a summary of recent conversations (optionally from a specific chat)
+- `/tasks` - Show pending tasks from Linear
+- `/reminders` - Check unanswered questions
+- `/teamreport` - View team productivity report
+- `/createtask` - Manually create a new task in Linear
 
-### Пример получения сводки 
+### Example Summary Retrieval 
 
 ```
 🤖 @assistant_akuz3_bot
@@ -94,7 +94,7 @@ Tasks identified:
 - Schedule a meeting with the client next week
 ```
 
-### Пример отслеживания вопросов
+### Example Question Tracking
 
 ```
 🤖 @assistant_akuz3_bot
@@ -110,7 +110,7 @@ Reminder count: 1
 [Respond] [Ignore]
 ```
 
-### Пример автоматического обнаружения задач
+### Example Automatic Task Detection
 
 ```
 🤖 @assistant_akuz3_bot
@@ -127,74 +127,74 @@ From chat: Dev Team
 [Create Task] [Ignore]
 ```
 
-## 🛠️ Требования
+## 🛠️ Requirements
 
 - Python 3.8+
-- API-ключи Telegram (из [my.telegram.org/apps](https://my.telegram.org/apps))
-- Токен бота Telegram (от [@BotFather](https://t.me/BotFather))
-- OpenAI API ключ с доступом к GPT-4o
-- Linear API ключ (опционально, для интеграции с задачами)
+- Telegram API keys (from [my.telegram.org/apps](https://my.telegram.org/apps))
+- Telegram bot token (from [@BotFather](https://t.me/BotFather))
+- OpenAI API key with access to GPT-4o
+- Linear API key (optional, for task integration)
 
-## 📦 Установка
+## 📦 Installation
 
-1. Клонировать репозиторий:
+1. Clone the repository:
 
 ```bash
 git clone https://github.com/yourusername/telegram-ai-assistant.git
 cd telegram-ai-assistant
 ```
 
-2. Установить необходимые пакеты:
+2. Install the required packages:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Создать файл `.env` на основе `.env.example`:
+3. Create a `.env` file based on `.env.example`:
 
 ```bash
 cp .env.example .env
 ```
 
-4. Отредактировать файл `.env` с вашими учетными данными.
+4. Edit the `.env` file with your credentials.
 
-5. Инициализировать базу данных:
+5. Initialize the database:
 
 ```bash
 python -m telegram_ai_assistant.utils.db_models
 ```
 
-## 🚀 Запуск
+## 🚀 Running
 
-### Запуск с помощью screen для работы в фоновом режиме
+### Running with screen for background operation
 
 ```bash
-# Запуск userbot (чтение сообщений)
+# Start userbot (reading messages)
 screen -S telegram_assistant -d -m bash -c "cd /path/to/telegram_ai_assistant && source venv/bin/activate && python -m telegram_ai_assistant.main --mode userbot"
 
-# Запуск бота (интерфейс взаимодействия)
+# Start bot (interaction interface)
 screen -S telegram_bot -d -m bash -c "cd /path/to/telegram_ai_assistant && source venv/bin/activate && python -m telegram_ai_assistant.main --mode bot"
 ```
 
-### Управление screen-сессиями
+### Managing screen sessions
 
 ```bash
-# Просмотр списка запущенных сессий
+# View the list of running sessions
 screen -ls
 
-# Подключение к сессии
+# Connect to a session
 screen -r telegram_assistant
 
-# Отключение от сессии (без остановки)
-# Нажмите Ctrl+A, затем D
+# Detach from a session (without stopping)
+# Press Ctrl+A, then D
 
-# Завершение сессии
+# Terminate a session
 screen -S telegram_assistant -X quit
 ```
 
-## 🔧 Настройка
+## 🔧 Configuration
 
-### Настройка переменных окружения (.env)
+### Setting up environment variables (.env)
 
 ```
 # Telegram API credentials
@@ -204,10 +204,7 @@ TELEGRAM_API_HASH=abcdef1234567890abcdef1234567890
 # Telegram Bot token
 BOT_TOKEN=1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ
 
-# Session name for user client
-USERBOT_SESSION=user_session
-
-# Chat IDs to monitor (пустой массив для мониторинга всех чатов)
+# Chat IDs to monitor (empty array to monitor all chats)
 MONITORED_CHATS=[]
 
 # OpenAI API key
@@ -226,41 +223,44 @@ LINEAR_TEAM_MAPPING={"default": "TEAM_NAME"}
 ADMIN_USER_ID=1234567890
 ```
 
-### Поиск ID чатов
+### Finding Chat IDs
 
-Используйте утилиту для получения ID чатов:
+Use the utility to get chat IDs:
 
 ```bash
 python -m telegram_ai_assistant.utils.get_chat_ids
 ```
 
-## 📋 Часто задаваемые вопросы
+## 📋 Frequently Asked Questions
 
-### Как узнать мой Telegram User ID?
-Отправьте сообщение боту [@userinfobot](https://t.me/userinfobot) в Telegram
+### How to find my Telegram User ID?
+Send a message to the bot [@userinfobot](https://t.me/userinfobot) in Telegram
 
-### Будут ли видны другим пользователям действия ассистента?
-Нет, ассистент только читает сообщения с помощью userbot-клиента и не выполняет никаких видимых действий в чатах
+### Will the assistant's actions be visible to other users?
+No, the assistant only reads messages using the userbot client and does not perform any visible actions in chats.
 
-### Безопасно ли использовать ассистента с моим Telegram-аккаунтом?
-Да, если использовать его в рамках личного использования. Однако злоупотребление API Telegram может привести к ограничениям аккаунта
+### Is it safe to use the assistant with my Telegram account?
+Yes, if used for personal use. However, abuse of the Telegram API may lead to account restrictions.
 
-### Что делать, если другие клиенты Telegram разлогиниваются?
-Это может происходить из-за подозрительной активности. Используйте ассистента умеренно и убедитесь, что в коде userbot-клиента установлены правильные параметры device_model, system_version и app_version
+### What to do if other Telegram clients log out?
+This may happen due to suspicious activity. Use the assistant moderately and ensure that the userbot client code has the correct parameters for `device_model`, `system_version`, and `app_version`.
 
-## 🛡️ Безопасность
+## 🛡️ Security
 
-- Userbot имеет доступ ко всем сообщениям в мониторируемых чатах
-- Учетные данные хранятся в файле .env
-- Данные хранятся в локальной базе данных
-- Убедитесь, что сервер защищен и доступ ограничен
-- Соблюдайте конфиденциальность и нормы защиты данных
+- The userbot has access to all messages in monitored chats.
+- Credentials are stored in the `.env` file.
+- Data is stored in a local database.
+- Ensure the server is secure and access is restricted.
+- Maintain privacy and data protection standards.
 
-## 📄 Лицензия
+## 📄 License
 
 MIT License
 
-## ⚠️ Отказ от ответственности
+## ⚠️ Disclaimer
 
-Этот проект не связан с Telegram, OpenAI или Linear.
-Функциональность userbot использует API Telegram в соответствии с их условиями использования для личного использования, но имейте в виду, что неправильное использование может привести к ограничениям аккаунта. 
+This project is not affiliated with Telegram, OpenAI, or Linear. The userbot functionality uses the Telegram API in accordance with their terms of use for personal use, but be aware that misuse may lead to account restrictions.
+
+---
+
+If you need any further assistance or specific sections translated, feel free to ask!

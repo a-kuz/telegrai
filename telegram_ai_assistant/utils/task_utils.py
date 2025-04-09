@@ -5,36 +5,25 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ADMIN_USER_ID, BOT_TOKEN
-
-# Dictionary to store pending tasks
 pending_tasks = {}
-
 async def handle_potential_task(task_data: Dict[str, Any], message_data: Dict[str, Any], bot: Optional[Bot] = None):
     """Handle a potential task detected by AI"""
     try:
-        # If no bot instance provided, create one
         if bot is None:
             from aiogram.client.default import DefaultBotProperties
             bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
             needs_cleanup = True
         else:
             needs_cleanup = False
-            
-        # Generate a unique ID for this task
         task_id = f"task_{int(datetime.utcnow().timestamp())}"
-        
-        # Store task in pending tasks
         pending_tasks[task_id] = {
             **task_data,
             "chat_id": message_data.get("chat_id"),
             "message_id": message_data.get("message_id"),
             "detected_at": datetime.utcnow()
         }
-        
-        # Create inline keyboard
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
@@ -47,11 +36,8 @@ async def handle_potential_task(task_data: Dict[str, Any], message_data: Dict[st
                 )
             ]
         ])
-        
-        # Format task message
         assignee = task_data.get("assignee", "Not specified")
         due_date = task_data.get("due_date", "Not specified")
-        
         message = (
             f"📋 <b>Potential Task Detected</b>\n\n"
             f"<b>Title:</b> {task_data.get('title')}\n"
@@ -60,20 +46,14 @@ async def handle_potential_task(task_data: Dict[str, Any], message_data: Dict[st
             f"<b>Due Date:</b> {due_date}\n\n"
             f"<b>From chat:</b> {message_data.get('chat_name')}"
         )
-        
-        # Send notification
         await bot.send_message(
             ADMIN_USER_ID,
             message,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-        
-        # Cleanup if we created a bot instance
         if needs_cleanup:
             await bot.session.close()
-        
     except Exception as e:
         print(f"Error handling potential task: {str(e)}")
-        
     return pending_tasks 
