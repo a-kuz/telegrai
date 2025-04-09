@@ -1,21 +1,16 @@
 #!/bin/bash
 
-# Kill any existing bot processes
-echo "Checking for existing bot processes..."
-if screen -list | grep -q "telegram_bot"; then
-    echo "Killing existing telegram_bot screen session..."
-    screen -S telegram_bot -X quit
+# Check if process is running and kill it if it is
+if pgrep -f "python3 -m telegram_ai_assistant.main" > /dev/null; then
+    echo "Stopping existing Telegram AI Assistant process..."
+    pkill -f "python3 -m telegram_ai_assistant.main"
+    sleep 1  # Give process time to terminate
+else
+    echo "No existing Telegram AI Assistant process found."
 fi
 
-# Kill any python processes related to the bot
-echo "Killing any existing python processes for the bot..."
-pkill -f "python3 -m telegram_ai_assistant.main"
+# Start the application
+echo "Starting Telegram AI Assistant..."
+nohup python3 -m telegram_ai_assistant.main --mode all > ./telegram_bot.log 2>&1 &
 
-# Wait a moment for processes to terminate
-sleep 2
-
-# Start the bot in a new screen session
-echo "Starting telegram bot..."
-cd /srv/app && screen -S telegram_bot -d -m bash -c "source venv/bin/activate && python3 -m telegram_ai_assistant.main --mode bot"
-
-echo "Bot started successfully."
+echo "Telegram AI Assistant started with PID: $!"

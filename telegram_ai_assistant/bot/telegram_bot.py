@@ -10,27 +10,32 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import aiogram.utils.markdown as md
 from collections import defaultdict
+import re
+import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bot.bot_config import BOT_TOKEN, ADMIN_USER_ID
-from config import OPENAI_MODEL
-from utils.db_utils import (
+from telegram_ai_assistant.bot.bot_config import BOT_TOKEN, ADMIN_USER_ID
+from telegram_ai_assistant.config import OPENAI_MODEL, LINEAR_TEAM_MAPPING
+from telegram_ai_assistant.utils.db_utils import (
     get_recent_chat_messages, 
     get_pending_reminders, 
     update_reminder_sent,
     get_tasks_by_due_date,
     get_team_productivity,
-    get_user_chats
+    get_user_chats,
+    execute_sql_query
 )
-from ai_module.ai_analyzer import (
+from telegram_ai_assistant.ai_module.ai_analyzer import (
     generate_chat_summary, 
     analyze_productivity,
     suggest_response,
-    client
+    client,
+    generate_sql_from_question
 )
-from linear_integration.linear_client import LinearClient
-from userbot.telegram_client import send_message_as_user
-from utils.task_utils import pending_tasks
-from utils.logging_utils import setup_bot_logger, log_startup
+from telegram_ai_assistant.ai_module.context_processor import process_question_with_context, analyze_message_intent
+from telegram_ai_assistant.linear_integration.linear_client import LinearClient
+from telegram_ai_assistant.userbot.telegram_client import send_message_as_user
+from telegram_ai_assistant.utils.task_utils import pending_tasks
+from telegram_ai_assistant.utils.logging_utils import setup_bot_logger, log_startup
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 linear_client = LinearClient()
@@ -38,7 +43,9 @@ logger = setup_bot_logger()
 user_states = {}
 AWAITING_TASK_TITLE = "awaiting_title"
 AWAITING_TASK_DESCRIPTION = "awaiting_description"
+AWAITING_TASK_CONFIRMATION = "awaiting_task_confirmation"
 task_creation_data = defaultdict(dict)
+task_confirmation_data = defaultdict(dict)
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     """Handle /start command"""
@@ -75,6 +82,13 @@ async def cmd_help(message: types.Message):
         "/chats - List your available chats\n"
         "/createtask - Create a new task in Linear\n"
         "/respond [chat_id] [message_id] - Respond to a message\n"
+        "/ask [question] - Query the database using natural language\n"
+        "  • Добавьте флаг --details или -d для просмотра деталей контекста\n\n"
+        
+        "🧠 <b>Улучшенные возможности:</b>\n"
+        "• Бот теперь анализирует 40 сообщений из текущего чата для контекста\n"
+        "• При необходимости запрашивает историю других чатов или данные из БД\n"
+        "• Автоматически определяет, какая информация нужна для ответа\n"
     )
     
     await message.reply(help_text, parse_mode="HTML")
@@ -197,28 +211,136 @@ async def cmd_teamreport(message: types.Message):
             "<i>Period: Last 7 days</i>\n\n",
             "<b>Raw Data:</b>"
         ]
+        
+        # Sort productivity data by message count (descending)
+        productivity_data = sorted(
+            productivity_data, 
+            key=lambda x: x.get('total_messages', 0), 
+            reverse=True
+        )
+        
         for item in productivity_data:
+            name = item.get('name', 'Unknown User')
+            # Remove any 'None' values that might be appended to the name
+            if name.endswith(' None'):
+                name = name.replace(' None', '')
+            
+            # Format message count with thousand separator for readability
+            message_count = "{:,}".format(item.get('total_messages', 0))
+            tasks_created = item.get('tasks_created', 0)
+            tasks_completed = item.get('tasks_completed', 0)
+            
             user_stats = (
-                f"• <b>{item.get('name')}</b>:\n"
-                f"  Messages: {item.get('total_messages', 0)}\n"
-                f"  Tasks created: {item.get('tasks_created', 0)}\n"
-                f"  Tasks completed: {item.get('tasks_completed', 0)}\n"
+                f"• <b>{name}</b>:\n"
+                f"  Messages: {message_count}\n"
+                f"  Tasks created: {tasks_created}\n"
+                f"  Tasks completed: {tasks_completed}\n"
             )
             response.append(user_stats)
+        
         response.append("\n<b>Analysis:</b>\n" + analysis)
         await processing_msg.edit_text("\n".join(response), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error generating team report: {str(e)}")
         await processing_msg.edit_text(f"Error generating team report: {str(e)}")
 @dp.message(Command("createtask"))
-async def cmd_createtask(message: types.Message):
-    """Create a new task in Linear"""
-    if message.from_user.id != ADMIN_USER_ID:
-        return
-    user_states[message.from_user.id] = AWAITING_TASK_TITLE
+async def cmd_createtask(message: types.Message, task_title_from_message: bool = False):
+    """Handle /createtask command, create a new task in Linear"""
+    user_id = message.from_user.id
+    
+    # Если сообщение уже содержит название задачи
+    if task_title_from_message and message.text:
+        text = message.text.strip()
+        
+        # Извлекаем название задачи из текста сообщения
+        title = text
+        description = ""
+        
+        # Удаляем префиксы команд
+        prefixes_to_remove = [
+            "создай", "создать", "добавь", "добавить", "новый", "новая", 
+            "таск", "задача", "задачу", "задание"
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if title.lower().startswith(prefix):
+                title = title[len(prefix):].strip()
+        
+        # Проверяем на указание "без описания"
+        if "без описания" in title.lower():
+            title = title.lower().replace("без описания", "").strip()
+        
+        # Если после обработки осталось название
+        if title:
+            processing_msg = await message.reply(f"Создаю задачу с названием: {title}")
+            
+            try:
+                # Get team ID
+                team_id = await linear_client.get_team_id_for_chat(message.chat.id)
+                
+                if not team_id:
+                    # Проверяем и загружаем конфигурацию LINEAR_TEAM_MAPPING
+                    from telegram_ai_assistant.config import LINEAR_TEAM_MAPPING
+                    
+                    logger.debug(f"LINEAR_TEAM_MAPPING: {LINEAR_TEAM_MAPPING}")
+                    
+                    if not LINEAR_TEAM_MAPPING or not isinstance(LINEAR_TEAM_MAPPING, dict):
+                        error_msg = "❌ Ошибка: LINEAR_TEAM_MAPPING не настроен или некорректный формат. Проверьте .env файл."
+                        logger.error(error_msg)
+                        await processing_msg.edit_text(error_msg)
+                        return
+                        
+                    # Проверяем наличие default команды
+                    if "default" not in LINEAR_TEAM_MAPPING:
+                        error_msg = "❌ Ошибка: В LINEAR_TEAM_MAPPING отсутствует 'default' команда. Добавьте её в .env файл."
+                        logger.error(error_msg)
+                        await processing_msg.edit_text(error_msg)
+                        return
+                        
+                    team_id = LINEAR_TEAM_MAPPING.get("default")
+                    
+                if not team_id:
+                    await processing_msg.edit_text("❌ Error: Could not determine which Linear team to assign this task to.")
+                    return
+                
+                # Логируем данные для отладки
+                logger.info(f"Creating Linear task with title: '{title}', team_id: '{team_id}'")
+                
+                # Create issue in Linear
+                issue = await linear_client.create_issue(
+                    title=title,
+                    description=description,
+                    team_id=team_id
+                )
+                
+                # Send confirmation
+                await processing_msg.edit_text(
+                    f"✅ Задача создана в Linear!\n\n"
+                    f"<b>Название:</b> {issue.get('title')}\n"
+                    f"<b>ID:</b> {issue.get('identifier')}\n"
+                    f"<b>URL:</b> {issue.get('url')}",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Error creating Linear task: {error_msg}", exc_info=True)
+                
+                # Добавляем более информативное сообщение в зависимости от типа ошибки
+                if "Argument Validation Error" in error_msg:
+                    error_display = "❌ Ошибка при создании задачи: Ошибка валидации данных. Возможно, неверный ID команды или другие параметры.\n\nПроверьте настройки LINEAR_TEAM_MAPPING в файле .env"
+                elif "authentication failed" in error_msg.lower():
+                    error_display = "❌ Ошибка аутентификации в Linear API. Проверьте токен LINEAR_API_KEY в файле .env"
+                else:
+                    error_display = f"❌ Ошибка при создании задачи: {error_msg}"
+                
+                await processing_msg.edit_text(error_display)
+            
+            return
+    
+    # Стандартный поток создания задачи через состояния
+    user_states[user_id] = AWAITING_TASK_TITLE
     await message.reply(
-        "Let's create a new task in Linear.\n\n"
-        "Please enter the task title:"
+        "Please enter a title for the new task:"
     )
 @dp.message(Command("chats"))
 async def cmd_chats(message: types.Message):
@@ -231,24 +353,41 @@ async def cmd_chats(message: types.Message):
     processing_msg = await message.reply("Fetching your chats...")
     
     try:
-        # Get all chats for the user
-        chats = await get_user_chats(message.from_user.id)
+        # Get all chats from the database directly
+        from telegram_ai_assistant.utils.db_utils import execute_sql_query
         
-        if not chats:
+        # Simple direct query to get all chats
+        sql_query = """
+        SELECT 
+            chats.id, 
+            chats.chat_id, 
+            chats.chat_name, 
+            chats.is_active,
+            (SELECT COUNT(*) FROM messages WHERE messages.chat_id = chats.chat_id) as message_count,
+            (SELECT MAX(timestamp) FROM messages WHERE messages.chat_id = chats.chat_id) as last_message_time
+        FROM chats
+        ORDER BY message_count DESC
+        """
+        
+        # Execute the query directly
+        logger.info(f"Executing SQL query: {sql_query}")
+        query_result = await execute_sql_query(sql_query)
+        
+        if not query_result:
             await processing_msg.edit_text("You don't have any chats yet.")
             return
         
         # Format the chat list
         chat_list = ["📃 <b>Your Chats</b>\n"]
         
-        for chat in chats:
-            chat_name = chat["chat_name"] if chat["chat_name"] else f"Chat {chat['chat_id']}"
-            status = "✅ Active" if chat["is_active"] else "❌ Inactive"
+        for chat in query_result:
+            chat_name = chat.get("chat_name") if chat.get("chat_name") else f"Chat {chat.get('chat_id')}"
+            status = "✅ Active" if chat.get("is_active") else "❌ Inactive"
             
             # Format last message time
             last_activity = "Never"
             if chat.get("last_message_time"):
-                last_message_time = chat["last_message_time"]
+                last_message_time = datetime.fromisoformat(chat.get("last_message_time"))
                 delta = datetime.utcnow() - last_message_time
                 if delta.days > 0:
                     last_activity = f"{delta.days} days ago"
@@ -259,7 +398,7 @@ async def cmd_chats(message: types.Message):
             
             chat_info = (
                 f"• <b>{chat_name}</b>\n"
-                f"  ID: {chat['chat_id']}\n"
+                f"  ID: {chat.get('chat_id')}\n"
                 f"  Status: {status}\n"
                 f"  Messages: {chat.get('message_count', 0)}\n"
                 f"  Last activity: {last_activity}\n"
@@ -271,15 +410,113 @@ async def cmd_chats(message: types.Message):
     except Exception as e:
         logger.error(f"Error retrieving chats: {str(e)}")
         await processing_msg.edit_text(f"Error retrieving chats: {str(e)}")
-@dp.message()
-async def handle_all_messages(message: types.Message):
-    """Handle all regular messages, including task creation steps and questions"""
-    user_id = message.from_user.id
+@dp.message(Command("ask"))
+async def cmd_ask(message: types.Message):
+    """Handle /ask command to query the database with natural language"""
+    command_parts = message.text.split(maxsplit=1)
     
-    # Only process messages from admin
-    if user_id != ADMIN_USER_ID:
+    # Проверка наличия флага технических деталей
+    show_details = False
+    question = ""
+    
+    if len(command_parts) < 2:
+        await message.reply("Пожалуйста, укажите вопрос после команды /ask.")
         return
     
+    # Проверяем наличие флага --details или -d
+    if "--details" in command_parts[1] or "-d" in command_parts[1]:
+        show_details = True
+        # Удаляем флаг из вопроса
+        question = command_parts[1].replace("--details", "").replace("-d", "").strip()
+        if not question:
+            await message.reply("Пожалуйста, укажите вопрос после команды и флага.")
+            return
+    else:
+        question = command_parts[1]
+    
+    processing_msg = await message.reply("Анализирую ваш вопрос...")
+    
+    try:
+        # Получаем список доступных чатов
+        available_chats = await get_user_chats()
+        
+        # Обрабатываем вопрос с учетом контекста
+        result = await process_question_with_context(
+            question=question, 
+            chat_id=message.chat.id, 
+            available_chats=available_chats
+        )
+        
+        # Если нужно показать детали и контекста
+        if show_details:
+            detailed_info = []
+            
+            # Информация о типе контекста
+            context_type = result.get("context_type", "unknown")
+            if context_type == "database_query":
+                detailed_info.append("🔍 <b>Запрос к базе данных</b>")
+            elif context_type == "chat_history":
+                detailed_info.append("📜 <b>Использование истории чатов</b>")
+            elif context_type == "use_available_context":
+                detailed_info.append("📝 <b>Использование доступного контекста</b>")
+            
+            # Дополнительная информация об использованных данных
+            if result.get("additional_data_used"):
+                detailed_info.append("📊 Использованы данные из базы данных")
+            
+            if result.get("additional_chat_history_used"):
+                detailed_info.append("💬 Использована дополнительная история чатов")
+                
+            # Собираем детальный ответ
+            detailed_response = [
+                f"<b>Ваш вопрос:</b> {question}\n",
+                "\n".join(detailed_info),
+                "\n\n<b>Ответ:</b>",
+                result.get("answer", "Не удалось сформировать ответ на ваш вопрос. Пожалуйста, уточните запрос.")
+            ]
+            
+            await processing_msg.edit_text("\n".join(detailed_response), parse_mode="HTML")
+        else:
+            # Простой ответ без деталей
+            if "answer" in result:
+                await processing_msg.edit_text(result["answer"])
+            else:
+                logger.warning("Missing 'answer' key in context processor result")
+                await processing_msg.edit_text("Не удалось сформировать ответ на ваш вопрос. Пожалуйста, уточните запрос.")
+            
+            # Логируем детали использованного контекста
+            logger.debug(f"Тип использованного контекста: {result.get('context_type')}")
+            logger.debug(f"Использованы данные из БД: {result.get('additional_data_used', False)}")
+            logger.debug(f"Использована история чатов: {result.get('additional_chat_history_used', False)}")
+            
+    except Exception as e:
+        logger.error(f"Error processing contextual question: {str(e)}")
+        await processing_msg.edit_text(f"Произошла ошибка: {str(e)}")
+@dp.message()
+async def handle_message(message: types.Message):
+    """Process regular messages"""
+    user_id = message.from_user.id
+    
+    # Prevent processing messages in groups unless bot is mentioned
+    if message.chat.type in ['group', 'supergroup']:
+        # Skip processing if not mentioned, not a reply to bot, and not a direct command
+        bot_info = await bot.get_me()
+        bot_username = bot_info.username
+        
+        is_mentioned = False
+        if message.text:
+            is_mentioned = f"@{bot_username}" in message.text or message.text.startswith("/")
+        
+        is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id
+        
+        if not (is_mentioned or is_reply_to_bot):
+            return
+    
+    # Skip processing for bot commands
+    if message.text and message.text.startswith("/"):
+        return
+        
+    # Only process task creation flow for any user
     # Check if user is in task creation flow
     current_state = user_states.get(user_id)
     
@@ -300,6 +537,7 @@ async def handle_all_messages(message: types.Message):
             )
         else:
             await message.reply("Please enter a valid task title.")
+        return
     
     elif current_state == AWAITING_TASK_DESCRIPTION:
         # User is entering task description
@@ -315,28 +553,53 @@ async def handle_all_messages(message: types.Message):
         user_states.pop(user_id)
         
         # Create the task
-        await message.reply("Creating task in Linear...")
+        processing_msg = await message.reply("Creating task in Linear...")
         
         try:
             # Get team ID
             team_id = await linear_client.get_team_id_for_chat(message.chat.id)
             
             if not team_id:
+                # Проверяем и загружаем конфигурацию LINEAR_TEAM_MAPPING
+                from telegram_ai_assistant.config import LINEAR_TEAM_MAPPING
+                
+                logger.debug(f"LINEAR_TEAM_MAPPING: {LINEAR_TEAM_MAPPING}")
+                
+                if not LINEAR_TEAM_MAPPING or not isinstance(LINEAR_TEAM_MAPPING, dict):
+                    error_msg = "❌ Ошибка: LINEAR_TEAM_MAPPING не настроен или некорректный формат. Проверьте .env файл."
+                    logger.error(error_msg)
+                    await processing_msg.edit_text(error_msg)
+                    task_creation_data.pop(user_id, None)
+                    return
+                    
+                # Проверяем наличие default команды
+                if "default" not in LINEAR_TEAM_MAPPING:
+                    error_msg = "❌ Ошибка: В LINEAR_TEAM_MAPPING отсутствует 'default' команда. Добавьте её в .env файл."
+                    logger.error(error_msg)
+                    await processing_msg.edit_text(error_msg)
+                    task_creation_data.pop(user_id, None)
+                    return
+                    
                 team_id = LINEAR_TEAM_MAPPING.get("default")
                 
             if not team_id:
-                await message.reply("❌ Error: Could not determine which Linear team to assign this task to.")
+                await processing_msg.edit_text("❌ Error: Could not determine which Linear team to assign this task to.")
+                task_creation_data.pop(user_id, None)
                 return
+            
+            # Логируем данные для отладки
+            title = task_creation_data[user_id]["title"]
+            logger.info(f"Creating Linear task with title: '{title}', team_id: '{team_id}'")
             
             # Create issue in Linear
             issue = await linear_client.create_issue(
-                title=task_creation_data[user_id]["title"],
-                description=task_creation_data[user_id]["description"],
+                title=title,
+                description=task_description,
                 team_id=team_id
             )
             
             # Send confirmation
-            await message.reply(
+            await processing_msg.edit_text(
                 f"✅ Task created in Linear!\n\n"
                 f"<b>Title:</b> {issue.get('title')}\n"
                 f"<b>ID:</b> {issue.get('identifier')}\n"
@@ -348,125 +611,231 @@ async def handle_all_messages(message: types.Message):
             del task_creation_data[user_id]
             
         except Exception as e:
-            logger.error(f"Error creating Linear task: {str(e)}")
-            await message.reply(f"Error creating Linear task: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Error creating Linear task: {error_msg}", exc_info=True)
+            
+            # Добавляем более информативное сообщение в зависимости от типа ошибки
+            if "Argument Validation Error" in error_msg:
+                error_display = "❌ Ошибка при создании задачи: Ошибка валидации данных. Возможно, неверный ID команды или другие параметры.\n\nПроверьте настройки LINEAR_TEAM_MAPPING в файле .env"
+            elif "authentication failed" in error_msg.lower():
+                error_display = "❌ Ошибка аутентификации в Linear API. Проверьте токен LINEAR_API_KEY в файле .env"
+            else:
+                error_display = f"❌ Ошибка при создании задачи: {error_msg}"
+            
+            await processing_msg.edit_text(error_display)
             task_creation_data.pop(user_id, None)
-    else:
-        # Check if the message appears to be a command in natural language
-        text = message.text.lower()
-        
-        # Chat related commands
-        if any(pattern in text for pattern in [
-            'my chats', 'list chats', 'show chats', 'what chats', 'which chats', 'available chats',
-            'chats do i have', 'show my chats', 'my chat list', 'какие у меня чаты', 'мои чаты',
-            'список чатов', 'покажи чаты', 'какие чаты'
-        ]):
-            await cmd_chats(message)
-            return
-        
-        # Task related commands
-        elif any(pattern in text for pattern in ['create task', 'add task', 'new task', 'create a task', 'add a task']):
-            await cmd_createtask(message)
-            return
-        elif any(pattern in text for pattern in ['my tasks', 'list tasks', 'show tasks', 'pending tasks', 'task list']):
-            await cmd_tasks(message)
-            return
-            
-        # Summary related commands    
-        elif any(pattern in text for pattern in ['show summary', 'get summary', 'summarize', 'chat summary', 'conversation summary']):
-            await cmd_summary(message)
-            return
-            
-        # Reminder related commands
-        elif any(pattern in text for pattern in ['show reminders', 'list reminders', 'pending questions', 'unanswered questions']):
-            await cmd_reminders(message)
-            return
-            
-        # Team report commands
-        elif any(pattern in text for pattern in ['team report', 'productivity report', 'show report', 'team productivity']):
-            await cmd_teamreport(message)
-            return
-            
-        # Help commands
-        elif ('help' in text and any(word in text for word in ['show', 'get', 'what', 'how', 'commands'])) or text == 'help':
-            await cmd_help(message)
-            return
-            
-        # Try to interpret the intent using AI if no direct command match
-        elif any(intent_word in text for intent_word in ['show', 'list', 'get', 'create', 'make', 'add', 'find']):
-            try:
-                # Use OpenAI to determine the user's intent
-                system_prompt = """
-                Determine which command the user is trying to access with their natural language request.
-                Pay special attention to requests about chats, conversations, or message groups.
-                
-                Choose from the following commands:
-                - chats - Show user's chats list (PRIORITY: If the query is about "what chats", "my chats", "available chats", etc.)
-                - summary - Generate a summary of recent conversations
-                - tasks - Show pending tasks
-                - reminders - Check for unanswered questions
-                - teamreport - View team productivity report
-                - createtask - Create a new task
-                - help - Show all available commands
-                
-                If the query mentions "chats", "conversations", "dialogs", or similar terms related to messaging, prioritize returning "chats".
-                
-                Return ONLY the command name and nothing else.
-                """
-                
-                response = await client.chat.completions.create(
-                    model=OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": message.text}
-                    ]
-                )
-                
-                detected_command = response.choices[0].message.content.strip().lower()
-                
-                # Execute the detected command
-                if detected_command == 'tasks':
-                    await cmd_tasks(message)
-                elif detected_command == 'summary':
-                    await cmd_summary(message)
-                elif detected_command == 'reminders':
-                    await cmd_reminders(message)
-                elif detected_command == 'teamreport':
-                    await cmd_teamreport(message)
-                elif detected_command == 'chats':
-                    await cmd_chats(message)
-                elif detected_command == 'createtask':
-                    await cmd_createtask(message)
-                elif detected_command == 'help':
-                    await cmd_help(message)
-                
-            except Exception as e:
-                logger.error(f"Error detecting command with AI: {str(e)}")
-                # Fall through to question answering
-                
-        # For any other message, assume it's a question and generate a response using AI
+        return
+    
+    # Process message using intent detection
+    if message.text:
+        # Get recent message history for context
         try:
-            # First, check if this is about chats but wasn't caught by our patterns
-            # This is a direct override to handle common chat queries that might otherwise
-            # go to the general AI response
-            if any(word in text for word in ['chat', 'чат', 'conversation', 'dialog']) and \
-               any(word in text for word in ['my', 'mine', 'have', 'list', 'show', 'мои', 'есть', 'список', 'покажи']):
-                logger.info("Detected chat-related query via keywords, redirecting to chat command")
-                await cmd_chats(message)
-                return
-                
-            # Show typing indicator to user
+            from telegram_ai_assistant.utils.db_utils import get_recent_chat_messages, execute_sql_query
+            
+            # Display a typing indicator while processing
             await bot.send_chat_action(message.chat.id, 'typing')
             
-            # Get AI-generated response
-            ai_response = await suggest_response(message.text)
+            # Generate SQL directly for common database queries
+            processing_msg = await message.reply("Анализирую...")
             
-            # Reply with the generated response
-            await message.reply(ai_response)
+            # Determine if this is a database query
+            from telegram_ai_assistant.ai_module.ai_analyzer import generate_sql_from_question
+            
+            # 1. Try to generate SQL query directly
+            sql_response = await generate_sql_from_question(message.text)
+            
+            # Check if we have a valid SQL query
+            if sql_response and "sql_query" in sql_response and sql_response["sql_query"].strip():
+                sql_query = sql_response["sql_query"]
+                explanation = sql_response.get("explanation", "Выполняю SQL запрос")
+                
+                logger.info(f"Generated SQL query: {sql_query}")
+                
+                # Log generated SQL
+                logger.info(f"AI generated SQL for question: {message.text}")
+                logger.info(f"SQL: {sql_query}")
+                
+                # Fix common SQL errors
+                if "chat_history" in sql_query.lower():
+                    logger.info("Fixing reference to non-existent chat_history table")
+                    sql_query = sql_query.lower().replace("chat_history", "messages")
+                
+                # Execute the query
+                try:
+                    logger.info("Executing SQL query...")
+                    query_result = await execute_sql_query(sql_query)
+                    
+                    # Format results for display
+                    if query_result:
+                        # Create response message based on the query results
+                        if isinstance(query_result, list) and len(query_result) > 0:
+                            if "error" in query_result[0]:
+                                # Error occurred
+                                await processing_msg.edit_text(f"❌ Ошибка выполнения SQL запроса: {query_result[0]['error']}")
+                                return
+                                
+                            # Format SQL results for better readability
+                            if len(query_result) > 1:
+                                # Format as table-like text for multiple rows
+                                columns = list(query_result[0].keys())
+                                
+                                # Create a response with the query results
+                                result_text = await client.chat.completions.create(
+                                    model=OPENAI_MODEL,
+                                    messages=[
+                                        {"role": "system", "content": "Ты аналитик данных. Твоя задача объяснить результаты SQL запроса кратко и понятно. Не упоминай SQL или запросы в ответе, просто интерпретируй данные как обычный человек. Используй факты из данных, не придумывай информацию."},
+                                        {"role": "user", "content": f"Вопрос пользователя: {message.text}\n\nРезультаты запроса ({len(query_result)} строк):\n{json.dumps(query_result, indent=2, ensure_ascii=False)}\n\nДай лаконичное объяснение этих данных на русском языке, не упоминая сам SQL запрос."}
+                                    ]
+                                )
+                                
+                                response_text = result_text.choices[0].message.content.strip()
+                                await processing_msg.edit_text(response_text)
+                            else:
+                                # Single row result
+                                result_text = await client.chat.completions.create(
+                                    model=OPENAI_MODEL,
+                                    messages=[
+                                        {"role": "system", "content": "Ты аналитик данных. Твоя задача объяснить результаты SQL запроса кратко и понятно. Не упоминай SQL или запросы в ответе, просто интерпретируй данные как обычный человек. Используй факты из данных, не придумывай информацию."},
+                                        {"role": "user", "content": f"Вопрос пользователя: {message.text}\n\nРезультаты запроса (1 строка):\n{json.dumps(query_result[0], indent=2, ensure_ascii=False)}\n\nДай лаконичное объяснение этих данных на русском языке, не упоминая сам SQL запрос."}
+                                    ]
+                                )
+                                
+                                response_text = result_text.choices[0].message.content.strip()
+                                await processing_msg.edit_text(response_text)
+                        else:
+                            await processing_msg.edit_text("Не найдены данные, соответствующие запросу.")
+                    else:
+                        await processing_msg.edit_text("По вашему запросу не найдено данных в базе.")
+                        
+                    return
+                except Exception as e:
+                    logger.error(f"Error executing SQL query: {str(e)}")
+                    # If SQL execution fails, fallback to context processor
+            
+            # 2. Fallback to analyze_message_intent for task creation/candidates
+            # Get recent messages for context analysis
+            recent_messages = await get_recent_chat_messages(message.chat.id, limit=10)
+            
+            # Analyze message intent
+            intent_analysis = await analyze_message_intent(message.text, recent_messages)
+            
+            logger.info(f"Message intent analysis: task_creation={intent_analysis['task_creation_score']}, "
+                        f"task_candidate={intent_analysis['task_candidate_score']}, "
+                        f"db_query={intent_analysis['database_query_score']}")
+            
+            # Handle direct task creation request (high task_creation_score)
+            if intent_analysis['primary_intent'] == 'task_creation' and intent_analysis['task_creation_score'] >= 7:
+                # Extract title and description
+                title = intent_analysis['task_title']
+                description = intent_analysis['task_description']
+                
+                if not title:
+                    title = "Untitled task"
+                
+                # Prepare task confirmation
+                task_confirmation_data[user_id] = {
+                    "title": title,
+                    "description": description,
+                    "chat_id": message.chat.id,
+                    "original_message_id": message.message_id,
+                    "context_analyzed": True
+                }
+                
+                # Set state
+                user_states[user_id] = AWAITING_TASK_CONFIRMATION
+                
+                # Create inline buttons
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✅ Создать задачу", 
+                            callback_data=f"confirm_task_{user_id}"
+                        ),
+                        InlineKeyboardButton(
+                            text="❌ Отмена", 
+                            callback_data=f"cancel_task_{user_id}"
+                        )
+                    ]
+                ])
+                
+                # Send confirmation message
+                await processing_msg.edit_text(
+                    f"Создать следующую задачу?\n\n"
+                    f"<b>Название:</b> {title}\n\n"
+                    f"<b>Описание:</b>\n{description}",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+                
+            # Handle task candidate (problem description that could be a task)
+            elif intent_analysis['primary_intent'] == 'task_candidate' and intent_analysis['task_candidate_score'] >= 7:
+                # Extract suggested title and description
+                title = intent_analysis['task_title']
+                description = intent_analysis['task_description']
+                
+                if not title:
+                    title = "Untitled task"
+                
+                # Prepare task confirmation
+                task_confirmation_data[user_id] = {
+                    "title": title,
+                    "description": description,
+                    "chat_id": message.chat.id,
+                    "original_message_id": message.message_id,
+                    "context_analyzed": True
+                }
+                
+                # Set state
+                user_states[user_id] = AWAITING_TASK_CONFIRMATION
+                
+                # Create inline buttons
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✅ Создать задачу", 
+                            callback_data=f"confirm_task_{user_id}"
+                        ),
+                        InlineKeyboardButton(
+                            text="❌ Отмена", 
+                            callback_data=f"cancel_task_{user_id}"
+                        )
+                    ]
+                ])
+                
+                # Send confirmation message with note that this was extracted from description
+                await processing_msg.edit_text(
+                    f"Похоже, вы описали проблему. Создать задачу на её основе?\n\n"
+                    f"<b>Название:</b> {title}\n\n"
+                    f"<b>Описание:</b>\n{description}",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+                
+            # 3. Final fallback - process with context processor
+            available_chats = await get_user_chats()
+            
+            # Process with context processor
+            await processing_msg.edit_text("Анализирую вопрос...")
+            
+            result = await process_question_with_context(
+                question=message.text, 
+                chat_id=message.chat.id, 
+                available_chats=available_chats
+            )
+            
+            # Update message with result
+            logger.info("Получен ответ с контекстом, обновляем сообщение")
+            if "answer" in result:
+                await processing_msg.edit_text(result["answer"])
+            else:
+                logger.warning("Missing 'answer' key in context processor result")
+                await processing_msg.edit_text("Не удалось сформировать ответ на ваш вопрос. Пожалуйста, уточните запрос.")
             
         except Exception as e:
-            logger.error(f"Error generating AI response: {str(e)}")
-            await message.reply("I'm having trouble processing that right now. Please try again later.")
+            logger.error(f"Error processing message: {str(e)}")
+            await message.reply(f"Произошла ошибка при обработке сообщения: {str(e)}")
 @dp.callback_query(lambda c: c.data.startswith('respond_'))
 async def callback_respond(callback_query: types.CallbackQuery):
     """Handle respond button click for unanswered questions"""
@@ -504,83 +873,150 @@ async def callback_ignore(callback_query: types.CallbackQuery):
         )
     else:
         await callback_query.answer("Failed to update reminder status")
-@dp.callback_query(lambda c: c.data.startswith('createtask_'))
-async def callback_createtask(callback_query: types.CallbackQuery):
-    """Handle create task button click for potential tasks"""
-    if callback_query.from_user.id != ADMIN_USER_ID:
-        return
+@dp.callback_query(lambda c: c.data.startswith('confirm_task_'))
+async def callback_confirm_task(callback_query: types.CallbackQuery):
+    """Handle confirm task button click"""
     parts = callback_query.data.split('_')
-    if len(parts) != 2:
-        await callback_query.answer("Invalid callback data")
+    if len(parts) != 3:
+        await callback_query.answer("Неверный формат данных")
         return
-    task_id = parts[1]
-    if task_id not in pending_tasks:
-        await callback_query.answer("Task not found or expired")
+        
+    user_id = int(parts[2])
+    
+    # Проверяем, что у нас есть данные для этого пользователя
+    if user_id not in task_confirmation_data:
+        await callback_query.answer("Данные задачи не найдены или устарели")
         return
-    task_data = pending_tasks[task_id]
-    await callback_query.answer()
+        
+    # Получаем данные задачи
+    task_data = task_confirmation_data[user_id]
+    
+    # Подтверждаем действие и изменяем текст кнопок
+    await callback_query.answer("Создаю задачу...")
+    
+    # Изменяем сообщение, чтобы показать процесс создания
+    await bot.edit_message_text(
+        f"Создаю задачу «<b>{task_data['title']}</b>»...",
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.message_id,
+        parse_mode="HTML"
+    )
+    
     try:
-        await bot.edit_message_text(
-            "Creating task in Linear...",
-            chat_id=callback_query.message.chat.id,
-            message_id=callback_query.message.message_id
-        )
-        team_id = await linear_client.get_team_id_for_chat(task_data.get("chat_id"))
+        # Получаем team ID
+        team_id = await linear_client.get_team_id_for_chat(task_data["chat_id"])
+        
+        if not team_id:
+            # Проверяем и загружаем конфигурацию LINEAR_TEAM_MAPPING
+            from telegram_ai_assistant.config import LINEAR_TEAM_MAPPING
+            
+            logger.debug(f"LINEAR_TEAM_MAPPING: {LINEAR_TEAM_MAPPING}")
+            
+            if not LINEAR_TEAM_MAPPING or not isinstance(LINEAR_TEAM_MAPPING, dict):
+                error_msg = "❌ Ошибка: LINEAR_TEAM_MAPPING не настроен или некорректный формат. Проверьте .env файл."
+                logger.error(error_msg)
+                await bot.edit_message_text(
+                    error_msg,
+                    chat_id=callback_query.message.chat.id,
+                    message_id=callback_query.message.message_id
+                )
+                return
+                
+            # Проверяем наличие default команды
+            if "default" not in LINEAR_TEAM_MAPPING:
+                error_msg = "❌ Ошибка: В LINEAR_TEAM_MAPPING отсутствует 'default' команда. Добавьте её в .env файл."
+                logger.error(error_msg)
+                await bot.edit_message_text(
+                    error_msg,
+                    chat_id=callback_query.message.chat.id,
+                    message_id=callback_query.message.message_id
+                )
+                return
+                
+            team_id = LINEAR_TEAM_MAPPING.get("default")
+            
         if not team_id:
             await bot.edit_message_text(
-                "⚠️ Could not determine which Linear team to assign this task to.",
+                "❌ Ошибка: Не удалось определить команду в Linear для назначения задачи.",
                 chat_id=callback_query.message.chat.id,
                 message_id=callback_query.message.message_id
             )
             return
+        
+        # Логируем данные для отладки
+        logger.info(f"Creating Linear task with title: '{task_data['title']}', team_id: '{team_id}'")
+        
+        # Создаем задачу в Linear
         issue = await linear_client.create_issue(
-            title=task_data.get("title", "Untitled Task"),
-            description=task_data.get("description", ""),
-            team_id=team_id,
-            assignee_id=task_data.get("assignee_id"),
-            due_date=task_data.get("due_date")
+            title=task_data["title"],
+            description=task_data["description"],
+            team_id=team_id
         )
+        
+        # Обновляем сообщение с результатом
         await bot.edit_message_text(
-            f"✅ Task created in Linear!\n\n"
-            f"<b>{issue.get('title')}</b>\n"
-            f"ID: {issue.get('identifier')}\n"
-            f"URL: {issue.get('url')}\n",
+            f"✅ Задача успешно создана в Linear!\n\n"
+            f"<b>Название:</b> {issue.get('title')}\n"
+            f"<b>ID:</b> {issue.get('identifier')}\n"
+            f"<b>URL:</b> {issue.get('url')}",
             chat_id=callback_query.message.chat.id,
             message_id=callback_query.message.message_id,
             parse_mode="HTML"
         )
-        if task_data.get("notify_chat", False):
-            chat_id = task_data.get("chat_id")
-            await send_message_as_user(
-                chat_id,
-                f"📋 Created task in Linear: {issue.get('identifier')} - {issue.get('title')}"
-            )
-        del pending_tasks[task_id]
+        
+        # Очищаем данные
+        del task_confirmation_data[user_id]
+        if user_id in user_states and user_states[user_id] == AWAITING_TASK_CONFIRMATION:
+            user_states.pop(user_id)
+            
     except Exception as e:
-        logger.error(f"Error creating Linear task: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"Error creating Linear task: {error_msg}", exc_info=True)
+        
+        # Добавляем более информативное сообщение в зависимости от типа ошибки
+        if "Argument Validation Error" in error_msg:
+            error_display = "❌ Ошибка при создании задачи: Ошибка валидации данных. Возможно, неверный ID команды или другие параметры.\n\nПроверьте настройки LINEAR_TEAM_MAPPING в файле .env"
+        elif "authentication failed" in error_msg.lower():
+            error_display = "❌ Ошибка аутентификации в Linear API. Проверьте токен LINEAR_API_KEY в файле .env"
+        else:
+            error_display = f"❌ Ошибка при создании задачи: {error_msg}"
+        
         await bot.edit_message_text(
-            f"❌ Error creating task in Linear: {str(e)}",
+            error_display,
             chat_id=callback_query.message.chat.id,
             message_id=callback_query.message.message_id
         )
-@dp.callback_query(lambda c: c.data.startswith('ignoretask_'))
-async def callback_ignoretask(callback_query: types.CallbackQuery):
-    """Handle ignore task button click for potential tasks"""
-    if callback_query.from_user.id != ADMIN_USER_ID:
-        return
+        
+        # Очищаем данные при ошибке
+        task_confirmation_data.pop(user_id, None)
+        if user_id in user_states and user_states[user_id] == AWAITING_TASK_CONFIRMATION:
+            user_states.pop(user_id)
+
+@dp.callback_query(lambda c: c.data.startswith('cancel_task_'))
+async def callback_cancel_task(callback_query: types.CallbackQuery):
+    """Handle cancel task button click"""
     parts = callback_query.data.split('_')
-    if len(parts) != 2:
-        await callback_query.answer("Invalid callback data")
+    if len(parts) != 3:
+        await callback_query.answer("Неверный формат данных")
         return
-    task_id = parts[1]
-    if task_id in pending_tasks:
-        del pending_tasks[task_id]
-    await callback_query.answer("Task ignored")
+        
+    user_id = int(parts[2])
+    
+    # Подтверждаем отмену
+    await callback_query.answer("Создание задачи отменено")
+    
+    # Обновляем сообщение
     await bot.edit_message_text(
-        "✓ This task suggestion has been ignored.",
+        "❌ Создание задачи отменено.",
         chat_id=callback_query.message.chat.id,
         message_id=callback_query.message.message_id
     )
+    
+    # Очищаем данные
+    task_confirmation_data.pop(user_id, None)
+    if user_id in user_states and user_states[user_id] == AWAITING_TASK_CONFIRMATION:
+        user_states.pop(user_id)
+
 async def check_reminders_periodically():
     """Periodically check for unanswered questions and send reminders"""
     logger.info("Starting periodic reminder checker")

@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional, Union
 import httpx
 from openai import AsyncOpenAI
 from PIL import Image
+import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import OPENAI_API_KEY, OPENAI_MODEL
 from utils.logging_utils import setup_ai_logger
@@ -261,4 +262,309 @@ async def suggest_response(question_text: str) -> str:
         suggested_response = response.choices[0].message.content
         return suggested_response
     except Exception as e:
-        return f"Error generating response: {str(e)}" 
+        return f"Error generating response: {str(e)}"
+async def determine_and_execute_query(user_question: str) -> Dict[str, Any]:
+    """
+    Использует OpenAI function calling для определения, требуется ли SQL запрос к базе данных
+    и генерирует его при необходимости.
+    
+    Args:
+        user_question: Вопрос пользователя
+        
+    Returns:
+        Dictionary с информацией о типе ответа, SQL запросе и результатами
+    """
+    # Описание доступных таблиц
+    db_schema = """
+    Доступные таблицы в базе данных:
+    
+    1. users (Пользователи):
+       - id: Integer, первичный ключ
+       - user_id: Integer, ID пользователя Telegram
+       - username: String, имя пользователя (может быть NULL)
+       - first_name: String, имя пользователя
+       - last_name: String, фамилия пользователя
+       - is_bot: Boolean, флаг бота
+       - created_at: DateTime, время создания записи
+    
+    2. messages (Сообщения):
+       - id: Integer, первичный ключ
+       - message_id: Integer, ID сообщения Telegram
+       - chat_id: Integer, внешний ключ на chats.chat_id
+       - sender_id: Integer, внешний ключ на users.user_id
+       - text: Text, текст сообщения
+       - attachments: JSON, прикрепленные файлы
+       - timestamp: DateTime, время сообщения
+       - is_important: Boolean, важное ли сообщение
+       - is_processed: Boolean, обработано ли сообщение
+       - category: String, категория сообщения
+       - is_bot: Boolean, отправлено ли ботом
+    
+    3. chats (Чаты):
+       - id: Integer, первичный ключ
+       - chat_id: Integer, ID чата Telegram
+       - chat_name: String, название чата
+       - is_active: Boolean, активен ли чат
+       - last_summary_time: DateTime, время последнего суммирования
+       - linear_team_id: String, ID команды в Linear
+       
+    4. tasks (Задачи):
+       - id: Integer, первичный ключ
+       - linear_id: String, ID задачи в Linear
+       - title: String, заголовок задачи
+       - description: Text, описание задачи
+       - status: String, статус задачи
+       - created_at: DateTime, время создания
+       - due_date: DateTime, срок исполнения
+       - assignee_id: Integer, внешний ключ на users.user_id
+       - message_id: Integer, ID сообщения, из которого создана задача
+       - chat_id: Integer, ID чата, из которого создана задача
+       
+    5. unanswered_questions (Неотвеченные вопросы):
+       - id: Integer, первичный ключ
+       - message_id: Integer, ID сообщения с вопросом
+       - chat_id: Integer, ID чата с вопросом
+       - target_user_id: Integer, внешний ключ на users.user_id (кому адресован вопрос)
+       - sender_id: Integer, ID пользователя, задавшего вопрос
+       - question: Text, текст вопроса
+       - asked_at: DateTime, время вопроса
+       - is_answered: Boolean, отвечен ли вопрос
+       - answered_at: DateTime, время ответа
+       - reminder_count: Integer, сколько напоминаний отправлено
+       - is_bot: Boolean, задан ли вопрос ботом
+       
+    6. team_productivity (Продуктивность команды):
+       - id: Integer, первичный ключ
+       - user_id: Integer, внешний ключ на users.user_id
+       - date: DateTime, дата записи
+       - message_count: Integer, количество сообщений
+       - tasks_created: Integer, количество созданных задач
+       - tasks_completed: Integer, количество завершенных задач
+       - avg_response_time: Integer, среднее время ответа
+    """
+    
+    # Определение функций для OpenAI
+    functions = [
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_sql_query",
+                "description": "Генерирует SQL-запрос к базе данных для получения запрошенной информации",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "sql_query": {
+                            "type": "string",
+                            "description": "SQL запрос для извлечения данных из базы данных"
+                        },
+                        "explanation": {
+                            "type": "string",
+                            "description": "Объяснение, какие данные запрашиваются и для чего"
+                        }
+                    },
+                    "required": ["sql_query", "explanation"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "answer_without_database",
+                "description": "Отвечает на вопрос без запроса к базе данных, когда информация может быть предоставлена напрямую",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "answer": {
+                            "type": "string",
+                            "description": "Ответ на вопрос пользователя"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Причина, почему запрос к базе данных не требуется"
+                        }
+                    },
+                    "required": ["answer", "reason"]
+                }
+            }
+        }
+    ]
+    
+    try:
+        # Отправляем запрос в OpenAI
+        response = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": f"""Ты ИИ-помощник для команды разработчиков, работающий через Telegram.
+                
+                Твоя задача - определить, требуется ли SQL-запрос к базе данных для ответа на вопрос пользователя о разработке или управлении проектами.
+                
+                {db_schema}
+                
+                Если вопрос пользователя требует получения информации из базы данных (например, статистика разработки, активность команды, задачи и сроки), 
+                используй функцию generate_sql_query и создай SQL-запрос.
+                
+                Фокусируйся на данных, связанных с разработкой и управлением проектами:
+                - Статистика задач и их статусы
+                - Активность разработчиков
+                - Тренды производительности команды
+                - Сроки выполнения задач
+                - Анализ коммуникаций команды
+                
+                Если вопрос не требует обращения к базе данных или содержит просьбу о чем-то, что не связано с данными (например, 'привет', 'как дела', 
+                'что ты умеешь', просьба о помощи, общие вопросы), используй функцию answer_without_database.
+                
+                Важно: не используй устаревшие шаблоны запросов и не угадывай структуру базы. Основывайся только на предоставленной схеме."""},
+                {"role": "user", "content": user_question}
+            ],
+            tools=functions,
+            tool_choice="auto"
+        )
+        
+        message = response.choices[0].message
+        
+        # Проверяем, была ли вызвана функция
+        if message.tool_calls:
+            tool_call = message.tool_calls[0]
+            function_name = tool_call.function.name
+            function_args = json.loads(tool_call.function.arguments)
+            
+            if function_name == "generate_sql_query":
+                # Нужен запрос к базе данных
+                sql_query = function_args.get("sql_query")
+                explanation = function_args.get("explanation")
+                
+                # Выполняем SQL запрос
+                from sqlalchemy import text
+                from utils.db_utils import engine
+                
+                result = None
+                error = None
+                
+                try:
+                    with engine.connect() as connection:
+                        result_proxy = connection.execute(text(sql_query))
+                        columns = result_proxy.keys()
+                        result_data = result_proxy.fetchall()
+                        
+                        # Преобразуем в список словарей
+                        result = [dict(zip(columns, row)) for row in result_data]
+                        
+                    # Генерируем человеческое объяснение результатов
+                    result_explanation_response = await client.chat.completions.create(
+                        model=OPENAI_MODEL,
+                        messages=[
+                            {"role": "system", "content": """Ты ИИ-аналитик для команды разработчиков, специализирующийся на управлении проектами.
+                            Твоя задача - объяснить результаты запроса к базе данных понятным языком, делая акцент на аспектах разработки ПО.
+                            
+                            Объясняя результаты команде разработчиков, делай акцент на:
+                            1. Прогресс по задачам и соблюдение сроков
+                            2. Продуктивность команды и отдельных разработчиков
+                            3. Тренды в коммуникации и сотрудничестве
+                            4. Приоритеты в работе и распределение нагрузки
+                            
+                            Важно:
+                            1. Отвечай только на заданный вопрос, без лишних деталей о SQL запросе
+                            2. Не объясняй, как работает запрос или как он был написан
+                            3. Просто дай краткий ответ по сути вопроса на основе данных из БД
+                            4. Если данных нет или результат пустой, так и скажи кратко
+                            5. Избегай технических терминов и джаргона SQL
+                            6. Не упоминай таблицы, соединения и SQL синтаксис в ответе
+                            7. Пиши так, как будто просто отвечаешь на вопрос пользователя
+                            8. Если в результатах есть конкретные имена, цифры или даты, включи их в ответ
+                            
+                            Плохой пример:
+                            "Запрос, представленный в вопросе, предназначен для поиска пользователей, которые не имеют назначенных задач..."
+                            
+                            Хороший пример:
+                            "В настоящее время три разработчика не имеют назначенных задач: Александр, Юлия и Максим. Это может быть хорошей возможностью перераспределить рабочую нагрузку в команде."
+                            """},
+                            {"role": "user", "content": f"Вопрос пользователя: '{user_question}'\nРезультаты: {result}"}
+                        ]
+                    )
+                    
+                    result_explanation = result_explanation_response.choices[0].message.content
+                    
+                    return {
+                        "type": "database_query",
+                        "question": user_question,
+                        "sql_query": sql_query,
+                        "explanation": explanation,
+                        "result": result,
+                        "user_friendly_answer": result_explanation,
+                        "error": None
+                    }
+                except Exception as e:
+                    error = str(e)
+                    # Пытаемся объяснить ошибку
+                    error_explanation_response = await client.chat.completions.create(
+                        model=OPENAI_MODEL,
+                        messages=[
+                            {"role": "system", "content": """Ты ИИ-помощник для команды разработчиков, объясняющий проблемы с получением данных.
+                            Объясни простым языком, почему не удалось получить запрошенную информацию о разработке или проекте.
+                            
+                            Важно:
+                            1. Говори как менеджер проектов, обращаясь к команде разработчиков
+                            2. Предложи альтернативные способы получить нужную информацию о проекте
+                            3. Не вдавайся в технические детали SQL ошибок
+                            4. Сфокусируйся на практической ценности для команды
+                            
+                            Плохой пример:
+                            "Ошибка, с которой вы столкнулись, связана с использованием оператора `ILIKE` в вашем SQL-запросе..."
+                            
+                            Хороший пример:
+                            "Не удалось получить информацию о статусе задач в текущем спринте. Попробуйте уточнить названия проектов или временной период, который вас интересует."
+                            """},
+                            {"role": "user", "content": f"Вопрос пользователя: '{user_question}'\nОшибка: {error}"}
+                        ]
+                    )
+                    
+                    error_explanation = error_explanation_response.choices[0].message.content
+                    error_explanation += "\n\nДля просмотра технических деталей используйте команду /ask с флагом --details."
+                    
+                    return {
+                        "type": "database_query_error",
+                        "question": user_question,
+                        "sql_query": sql_query,
+                        "explanation": explanation,
+                        "error": error,
+                        "error_explanation": error_explanation,
+                        "result": None,
+                        "user_friendly_answer": error_explanation
+                    }
+            else:
+                # Не требуется запрос к базе данных
+                answer = function_args.get("answer")
+                reason = function_args.get("reason")
+                
+                return {
+                    "type": "direct_answer",
+                    "question": user_question,
+                    "answer": answer,
+                    "reason": reason
+                }
+        else:
+            # Если функция не была вызвана, возвращаем обычный ответ
+            return {
+                "type": "general_answer",
+                "question": user_question,
+                "answer": message.content
+            }
+    except Exception as e:
+        return {
+            "type": "error",
+            "question": user_question,
+            "error": str(e),
+            "answer": f"Произошла ошибка при обработке вопроса: {str(e)}"
+        }
+async def generate_sql_from_question(question: str) -> Dict[str, Any]:
+    """
+    Generate SQL query from natural language question and execute it to get results
+    
+    Args:
+        question: Natural language question about data
+        
+    Returns:
+        Dictionary with generated SQL, results and explanation
+    """
+    # Используем новый метод с function calling
+    return await determine_and_execute_query(question) 

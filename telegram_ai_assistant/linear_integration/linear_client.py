@@ -2,12 +2,18 @@ import sys
 import os
 import json
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import httpx
+import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import LINEAR_API_KEY, LINEAR_TEAM_MAPPING
+from utils.logging_utils import setup_ai_logger
+
+logger = setup_ai_logger()
 LINEAR_API_URL = "https://api.linear.app/graphql"
+
 class LinearClient:
     def __init__(self, api_key: str = LINEAR_API_KEY):
         self.api_key = api_key
@@ -29,6 +35,13 @@ class LinearClient:
             "query": query,
             "variables": variables
         }
+        
+        # Log full request details
+        logger.info(f"Executing Linear API query:")
+        logger.info(f"API URL: {LINEAR_API_URL}")
+        logger.info(f"Query: {query}")
+        logger.info(f"Variables: {json.dumps(variables, indent=2)}")
+        
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -37,17 +50,63 @@ class LinearClient:
                     json=payload,
                     timeout=30.0  # Add timeout
                 )
+                
+                # Log response status
+                logger.info(f"Response status: {response.status_code}")
+                
                 if response.status_code != 200:
+                    # Log full error response
+                    logger.error(f"Error response: {response.text}")
+                    
                     if response.status_code == 401 or response.status_code == 400:
                         raise Exception(f"Linear API authentication failed. Please check your API key.")
                     else:
-                        raise Exception(f"Linear API Error: {response.status_code} - {response.text}")
+                        error_text = response.text
+                        try:
+                            error_json = response.json()
+                            if "errors" in error_json:
+                                error_details = json.dumps(error_json["errors"], indent=2)
+                                logger.error(f"GraphQL errors: {error_details}")
+                                error_text = f"GraphQL errors: {error_details}"
+                        except:
+                            pass
+                        raise Exception(f"Linear API Error: {response.status_code} - {error_text}")
+                
                 result = response.json()
+                # Log successful result (truncated)
+                logger.info(f"Received successful response from Linear API")
+                
                 if "errors" in result:
-                    error_msg = result.get('errors', [{}])[0].get('message', 'Unknown GraphQL error')
-                    raise Exception(f"GraphQL Error: {error_msg}")
+                    errors = result.get('errors', [])
+                    # Log all errors in detail
+                    logger.error(f"GraphQL errors in response: {json.dumps(errors, indent=2)}")
+                    
+                    if errors:
+                        # Extract detailed error messages
+                        error_messages = []
+                        for error in errors:
+                            message = error.get('message', 'Unknown error')
+                            
+                            # Include validation errors if present
+                            extensions = error.get('extensions', {})
+                            code = extensions.get('code', '')
+                            if code == 'VALIDATION_ERROR':
+                                validation_errors = extensions.get('validation', {})
+                                for field, field_errors in validation_errors.items():
+                                    error_messages.append(f"{field}: {', '.join(field_errors)}")
+                            
+                            error_messages.append(message)
+                        
+                        error_msg = " | ".join(error_messages)
+                        raise Exception(f"GraphQL Error: {error_msg}")
+                
+                # Log keys in the result data (without full content)
+                if "data" in result:
+                    logger.info(f"Result data keys: {list(result.get('data', {}).keys())}")
+                    
                 return result.get("data", {})
         except httpx.RequestError as e:
+            logger.error(f"Network error when connecting to Linear API: {str(e)}")
             raise Exception(f"Network error when connecting to Linear API: {str(e)}")
     async def get_teams(self) -> List[Dict[str, Any]]:
         query = """
@@ -308,6 +367,7 @@ class LinearClient:
         if users:
             return users[0]
         return None
+
 async def main():
     """Simple test function for the Linear client."""
     client = LinearClient()
@@ -339,5 +399,6 @@ async def main():
             print("❌ No teams found in your Linear workspace.")
     except Exception as e:
         print(f"❌ Error testing Linear client: {str(e)}")
+
 if __name__ == "__main__":
     asyncio.run(main()) 

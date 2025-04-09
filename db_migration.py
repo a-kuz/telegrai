@@ -2,6 +2,7 @@ import sqlite3
 import sys
 import os
 import logging
+from datetime import datetime
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -47,7 +48,7 @@ def run_migration():
             logger.info("Adding answered_at column to unanswered_questions table")
             cursor.execute("ALTER TABLE unanswered_questions ADD COLUMN answered_at DATETIME")
         
-        # Check User table for is_bot column
+        # Check User table columns
         cursor.execute("PRAGMA table_info(users)")
         user_columns = [column[1] for column in cursor.fetchall()]
         
@@ -55,6 +56,20 @@ def run_migration():
         if 'is_bot' not in user_columns:
             logger.info("Adding is_bot column to users table")
             cursor.execute("ALTER TABLE users ADD COLUMN is_bot BOOLEAN DEFAULT 0")
+        
+        # Add created_at column to User table if it doesn't exist
+        if 'created_at' not in user_columns:
+            logger.info("Adding created_at column to users table")
+            current_time = datetime.utcnow().isoformat()
+            cursor.execute(f"ALTER TABLE users ADD COLUMN created_at DATETIME DEFAULT '{current_time}'")
+            
+            # Update existing rows to have the current timestamp
+            cursor.execute(f"UPDATE users SET created_at = '{current_time}'")
+            
+        # Add username column to User table if it doesn't exist
+        if 'username' not in user_columns:
+            logger.info("Adding username column to users table")
+            cursor.execute("ALTER TABLE users ADD COLUMN username VARCHAR(255)")
         
         # Check Message table for is_bot column
         cursor.execute("PRAGMA table_info(messages)")

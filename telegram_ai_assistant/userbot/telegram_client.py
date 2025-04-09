@@ -29,6 +29,37 @@ client = TelegramClient(
 )
 linear_client = LinearClient()
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
+async def send_important_notification(message_data: Dict[str, Any]):
+    """Send a notification about an important message to the admin user."""
+    try:
+        sender_name = message_data.get("sender_name", "Unknown")
+        chat_name = message_data.get("chat_name", "Unknown chat")
+        message_text = message_data.get("text", "")
+        message_id = message_data.get("message_id", "unknown")
+        chat_id = message_data.get("chat_id", "unknown")
+        
+        # Truncate message if it's too long
+        if len(message_text) > 150:
+            message_text = message_text[:147] + "..."
+        
+        notification_text = (
+            f"⚠️ ВАЖНОЕ СООБЩЕНИЕ\n\n"
+            f"От: {sender_name}\n"
+            f"Чат: {chat_name}\n"
+            f"ID сообщения: {message_id}\n\n"
+            f"{message_text}"
+        )
+        
+        # Send notification to admin
+        if ADMIN_USER_ID:
+            await client.send_message(ADMIN_USER_ID, notification_text)
+            logger.info(f"Sent important message notification to admin for message {message_id} from chat {chat_id}")
+        else:
+            logger.warning("Admin user ID not set, cannot send important message notification")
+    except Exception as e:
+        logger.error(f"Error sending important message notification: {str(e)}", exc_info=True)
+
 async def process_new_message(event):
     """Process a new message from Telegram and perform AI analysis."""
     try:

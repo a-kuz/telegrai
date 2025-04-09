@@ -3,7 +3,7 @@ import os
 import json
 from datetime import datetime, timedelta
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine, func, and_
+from sqlalchemy import create_engine, func, and_, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.future import select
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,10 +29,31 @@ async def store_message(chat_id, chat_name, message_id, sender_id, sender_name,
             name_parts = sender_name.split(maxsplit=1)
             first_name = name_parts[0] if name_parts else ""
             last_name = name_parts[1] if len(name_parts) > 1 else ""
+            
+            # Extract username if present in sender_name (common format: first_name username)
+            username = None
+            if '@' in sender_name:
+                # Try to extract username if it's in the format with @
+                username_parts = [part for part in sender_name.split() if part.startswith('@')]
+                if username_parts:
+                    username = username_parts[0][1:]  # Remove @ symbol
+            
             logger.info(f"Creating new user record for user_id {sender_id} ({sender_name})")
-            user = User(user_id=sender_id, first_name=first_name, last_name=last_name, is_bot=is_bot)
+            user = User(
+                user_id=sender_id, 
+                first_name=first_name, 
+                last_name=last_name,
+                username=username,
+                is_bot=is_bot
+            )
             session.add(user)
             session.flush()
+        else:
+            # If user exists, make sure is_bot flag is set correctly
+            if user.is_bot != is_bot:
+                user.is_bot = is_bot
+                logger.info(f"Updated is_bot status for user {sender_id} to {is_bot}")
+                
         attachments_json = json.dumps(attachments) if attachments else "[]"
         message_time = timestamp if timestamp else datetime.utcnow()
         message = Message(
@@ -73,34 +94,80 @@ async def store_message(chat_id, chat_name, message_id, sender_id, sender_name,
     finally:
         session.close()
 async def get_recent_chat_messages(chat_id, hours=24, limit=100):
-    session = SessionLocal()
+    """
+    Retrieve recent messages from a specific chat
+    Args:
+        chat_id: Chat ID
+        hours: Number of hours to look back (default 24)
+        limit: Maximum number of messages to return
+    Returns:
+        List of message objects
+    """
     try:
-        logger.debug(f"Retrieving recent messages for chat {chat_id}, past {hours} hours, limit {limit}")
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-        messages = session.query(Message).filter(
-            Message.chat_id == chat_id,
-            Message.timestamp >= cutoff_time
-        ).order_by(Message.timestamp.desc()).limit(limit).all()
-        result = [
+        # Construct the SQL query with parameters
+        sql_query = text("""
+        SELECT m.id, m.message_id, m.chat_id, m.sender_id, 
+               m.text, m.timestamp, u.first_name, u.last_name, u.username, u.is_bot
+        FROM messages m
+        LEFT JOIN users u ON m.sender_id = u.user_id
+        WHERE m.chat_id = :chat_id
+        AND m.timestamp >= :timestamp
+        ORDER BY m.timestamp DESC
+        LIMIT :limit
+        """)
+        
+        # Calculate the timestamp for the given hours ago
+        timestamp = datetime.utcnow() - timedelta(hours=hours)
+        
+        # Log the query and parameters
+        logger.info(f"Executing SQL query to get recent chat messages:")
+        logger.info(f"SQL: {sql_query}")
+        logger.info(f"Parameters: chat_id={chat_id}, timestamp={timestamp}, limit={limit}")
+        
+        # Create a new session
+        session = SessionLocal()
+        
+        # Raw SQL query for better performance
+        result = session.execute(
+            sql_query,
             {
-                "id": msg.id,
-                "message_id": msg.message_id,
-                "sender_id": msg.sender_id,
-                "sender_name": f"{msg.sender.first_name} {msg.sender.last_name}".strip() if msg.sender else "Unknown",
-                "text": msg.text,
-                "timestamp": msg.timestamp,
-                "category": msg.category,
-                "is_important": msg.is_important
+                "chat_id": chat_id,
+                "timestamp": timestamp,
+                "limit": limit
             }
-            for msg in messages
-        ]
-        logger.debug(f"Retrieved {len(result)} messages for chat {chat_id}")
-        return result
-    except Exception as e:
-        logger.error(f"Error retrieving messages for chat {chat_id}: {str(e)}", exc_info=True)
-        raise e
-    finally:
+        )
+        
+        # Process and format the results
+        messages = []
+        for row in result:
+            # Construct sender name based on available information
+            sender_name = f"{row.first_name or ''} {row.last_name or ''}".strip()
+            if not sender_name and row.username:
+                sender_name = row.username
+            if not sender_name:
+                sender_name = f"User {row.sender_id}"
+                
+            if row.is_bot:
+                sender_name += " (bot)"
+                
+            messages.append({
+                "id": row.id,
+                "message_id": row.message_id,
+                "chat_id": row.chat_id,
+                "sender_id": row.sender_id,
+                "sender_name": sender_name,
+                "text": row.text,
+                "timestamp": row.timestamp
+            })
+        
+        # Log the number of messages retrieved
+        logger.info(f"Retrieved {len(messages)} messages from chat {chat_id}")
+        
         session.close()
+        return messages
+    except Exception as e:
+        logger.error(f"Error retrieving recent chat messages: {str(e)}")
+        return []
 async def mark_question_as_answered(message_id, chat_id):
     session = SessionLocal()
     try:
@@ -308,7 +375,27 @@ async def get_team_productivity(days=7):
         result = []
         for item in productivity_data:
             user = session.query(User).filter(User.user_id == item.user_id).first()
-            user_name = f"{user.first_name} {user.last_name}".strip() if user else "Unknown"
+            
+            # Skip bots
+            if user and user.is_bot:
+                continue
+                
+            # Fix user name formatting
+            if user:
+                first_name = user.first_name or ""
+                last_name = user.last_name or ""
+                username = user.username or ""
+                
+                if username and not (first_name or last_name):
+                    user_name = username
+                else:
+                    user_name = f"{first_name} {last_name}".strip()
+                
+                if not user_name:
+                    user_name = f"User {user.user_id}"
+            else:
+                user_name = f"Unknown User {item.user_id}"
+            
             result.append({
                 "user_id": item.user_id,
                 "name": user_name,
@@ -408,4 +495,61 @@ async def get_user_chats(user_id=None):
         logger.error(f"Error retrieving chats: {str(e)}", exc_info=True)
         return []  # Return empty list instead of raising exception
     finally:
-        session.close() 
+        session.close()
+async def execute_sql_query(sql_query: str):
+    """
+    Execute an arbitrary SQL query and return the results
+    
+    Args:
+        sql_query: SQL query string to execute
+        
+    Returns:
+        List of dictionaries with the query results
+    """
+    logger.info(f"Executing raw SQL query:")
+    logger.info(sql_query)
+    
+    try:
+        # Create a new session
+        session = SessionLocal()
+        
+        # Wrap the query string in SQLAlchemy text() function
+        sql_text = text(sql_query)
+        
+        # Execute the query directly
+        result = session.execute(sql_text)
+        
+        # Convert result to a list of dictionaries
+        columns = result.keys()
+        rows = []
+        
+        for row in result:
+            row_dict = {}
+            for i, column in enumerate(columns):
+                # Handle different data types appropriately
+                value = row[i]
+                if isinstance(value, datetime):
+                    value = value.isoformat()
+                row_dict[column] = value
+            rows.append(row_dict)
+        
+        # Log the results (limited to avoid huge logs)
+        if rows:
+            row_count = len(rows)
+            logger.info(f"Query returned {row_count} rows")
+            if row_count > 0:
+                # Log column names
+                logger.info(f"Columns: {', '.join(columns)}")
+                # Log first row as sample
+                if row_count > 0:
+                    logger.info(f"Sample row: {rows[0]}")
+        else:
+            logger.info("Query returned no results")
+        
+        session.close()
+        return rows
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error executing SQL query: {error_msg}")
+        logger.error(f"Query was: {sql_query}")
+        return [{"error": error_msg}] 
