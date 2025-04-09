@@ -37,6 +37,103 @@ The system consists of several components:
 4. **Telegram Bot** - provides an interface for interacting with the system
 5. **Database** - stores messages, tasks, and other data
 
+## 📊 Database Structure
+
+The system uses SQLite to store all data with the following tables:
+
+### 1. Users
+- `id` - Primary key
+- `user_id` - Telegram user ID
+- `username` - Telegram username
+- `first_name` - User's first name
+- `last_name` - User's last name
+- `is_bot` - Whether user is a bot
+- `created_at` - When user was added to DB
+
+### 2. Messages
+- `id` - Primary key
+- `message_id` - Telegram message ID
+- `chat_id` - ID of the chat where message was sent
+- `sender_id` - User ID who sent the message
+- `text` - Message content
+- `attachments` - JSON string with attachments
+- `timestamp` - When message was sent
+- `is_important` - Important flag
+- `is_processed` - Processed flag
+- `category` - Message category
+- `is_bot` - Whether sent by bot
+
+### 3. Chats
+- `id` - Primary key
+- `chat_id` - Telegram chat ID
+- `chat_name` - Chat name
+- `is_active` - Active status
+- `last_summary_time` - Last summary generation time
+- `linear_team_id` - Associated Linear team ID
+
+### 4. Tasks
+- `id` - Primary key
+- `linear_id` - Linear task ID
+- `title` - Task title
+- `description` - Task description
+- `status` - Task status
+- `created_at` - Creation time
+- `due_date` - Due date
+- `assignee_id` - Assigned user ID
+- `message_id` - Origin message ID
+- `chat_id` - Origin chat ID
+
+### 5. Unanswered Questions
+- `id` - Primary key
+- `message_id` - Question message ID
+- `chat_id` - Chat where question was asked
+- `target_user_id` - User who should answer
+- `sender_id` - User who asked
+- `question` - Question text
+- `asked_at` - When asked
+- `is_answered` - Answered status
+- `answered_at` - When answered
+- `reminder_count` - Reminder count
+- `last_reminder_at` - Last reminder time
+- `is_bot` - Whether from bot
+
+### 6. Team Productivity
+- `id` - Primary key
+- `user_id` - User ID
+- `date` - Record date
+- `message_count` - Message count
+- `tasks_created` - Tasks created
+- `tasks_completed` - Tasks completed
+- `avg_response_time` - Average response time
+
+## 📝 Message Classification
+
+The AI analyzes each message and classifies it into different categories:
+
+### Message Categories
+- **Question** - Message contains a question directed at someone
+- **Task** - Message describes work that needs to be done
+- **Status Update** - Message provides update on ongoing work
+- **General Discussion** - Regular conversation
+- **Error** - Message couldn't be properly analyzed
+
+### Message Intent Analysis
+The system scores messages on three dimensions:
+1. **Task Creation Request** (1-10) - How clearly it asks to create a task
+2. **Task Candidate** (1-10) - How suitable it is to become a task
+3. **Database Query** (1-10) - How likely it needs database information
+
+### Important Flags
+- **is_important** - Messages requiring prompt attention
+- **is_question** - Messages containing questions
+- **has_task** - Messages describing tasks
+
+### Question Reminder Conditions
+Reminders are only sent when:
+- The admin is directly tagged/mentioned in a message
+- Someone replies to the admin's message
+- Channel messages and comments on channel posts are filtered out
+
 ## 🧩 Usage Examples
 
 ### Chat Monitoring

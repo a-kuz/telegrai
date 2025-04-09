@@ -138,8 +138,40 @@ async def extract_task_from_message(message_data: Dict[str, Any]) -> Optional[Di
 async def detect_question_target(message_data: Dict[str, Any], admin_user_id: int) -> Optional[Dict[str, Any]]:
     text = message_data.get("text", "")
     sender_id = message_data.get("sender_id")
+    chat_type = message_data.get("chat_type", "")
+    
+    # Skip processing if sender is admin or bot
     if sender_id == admin_user_id or message_data.get("is_bot", False):
         return None
+    
+    # Check if message is from a channel or channel comments (they have channel_type)
+    if chat_type == "channel":
+        return None
+    
+    # Check if message is a reply to admin or contains a mention of admin
+    is_reply_to_admin = False
+    has_admin_mention = False
+    
+    # Check for reply to admin
+    original_event = message_data.get("original_event", {})
+    if hasattr(original_event, "reply_to_msg_id") and original_event.reply_to_msg_id:
+        try:
+            # Get the message this is replying to
+            reply_to_msg_id = original_event.reply_to_msg_id
+            replied_msg = message_data.get("replied_message", {})
+            if replied_msg and replied_msg.get("sender_id") == admin_user_id:
+                is_reply_to_admin = True
+        except Exception as e:
+            logger.error(f"Error checking reply message: {str(e)}")
+    
+    # Check for admin mention (using a simplified approach - this could be enhanced with entity parsing)
+    if "@admin" in text.lower() or f"@{admin_user_id}" in text:
+        has_admin_mention = True
+    
+    # Only proceed if the message is directly engaging with the admin
+    if not (is_reply_to_admin or has_admin_mention):
+        return None
+    
     system_prompt = """
     Analyze if this message contains a question directed at a specific person, especially the team lead or admin.
     Return a JSON with:
@@ -171,6 +203,7 @@ async def detect_question_target(message_data: Dict[str, Any], admin_user_id: in
                 }
         return None
     except Exception as e:
+        logger.error(f"Error in detect_question_target: {str(e)}")
         return None
 async def generate_chat_summary(messages: List[Dict[str, Any]], chat_name: str) -> str:
     formatted_messages = []
